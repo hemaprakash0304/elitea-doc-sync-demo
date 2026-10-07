@@ -14,8 +14,9 @@ import {
   type RepositoryFilterResult,
   type SecretScanner,
 } from "./filter.js";
+import { DEFAULT_TECHNOLOGY_ANALYZERS, runTechnologyAnalyzers, type TechnologyAnalysisResult } from "./analyzers/index.js";
 
-export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED";
+export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED";
 export type RunStatus = "configured" | "ready" | "partial" | "failed";
 
 export interface RunContext {
@@ -31,9 +32,9 @@ export interface RunContext {
   status: RunStatus;
 }
 
-export interface FilterCompletedDiagnostic {
+export interface AnalysisCompletedDiagnostic {
   level: "info" | "error";
-  event: "filter_completed" | "filter_blocked";
+  event: "analysis_completed" | "filter_blocked";
   runId: string;
   normalizedRepositoryId: string;
   repositoryId: number;
@@ -50,8 +51,10 @@ export interface FilterCompletedDiagnostic {
   scanCoverageComplete: boolean;
   profileSafety: RepositoryFilterResult["existingProfile"]["status"];
   executionContext: ExecutionContext;
-  fromStage: "COLLECTED";
-  toStage: "FILTERED";
+  observationCount: number;
+  analyzerIssueCount: number;
+  fromStage: "FILTERED";
+  toStage: "ANALYZED";
   status: RunStatus;
 }
 
@@ -74,7 +77,7 @@ export interface CoordinatorFailureDiagnostic {
 }
 
 export type CoordinatorResult =
-  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; diagnostic: FilterCompletedDiagnostic }
+  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; diagnostic: AnalysisCompletedDiagnostic }
   | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult };
 
 export interface CoordinatorDependencies {
@@ -155,14 +158,18 @@ export async function coordinateRun(
       };
     }
 
+    const analysis = runTechnologyAnalyzers(filtered, DEFAULT_TECHNOLOGY_ANALYZERS);
+    const analyzedContext: RunContext = { ...context, stage: "ANALYZED" };
+
     return {
       ok: true,
-      context,
+      context: analyzedContext,
       repository,
       filtered,
+      analysis,
       diagnostic: {
         level: "info",
-        event: "filter_completed",
+        event: "analysis_completed",
         runId,
         normalizedRepositoryId: repository.normalizedRepositoryId,
         repositoryId: repository.repositoryId,
@@ -178,10 +185,12 @@ export async function coordinateRun(
         scanStatus: filtered.scan.status,
         scanCoverageComplete: filtered.scan.coverageComplete,
         profileSafety: filtered.existingProfile.status,
-        executionContext: context.executionContext,
-        fromStage: "COLLECTED",
-        toStage: "FILTERED",
-        status: context.status,
+        observationCount: analysis.observations.length,
+        analyzerIssueCount: analysis.issues.length,
+        executionContext: analyzedContext.executionContext,
+        fromStage: "FILTERED",
+        toStage: "ANALYZED",
+        status: analyzedContext.status,
       },
     };
   } catch (error) {
