@@ -17,8 +17,9 @@ import {
 import { DEFAULT_TECHNOLOGY_ANALYZERS, runTechnologyAnalyzers, type TechnologyAnalysisResult } from "./analyzers/index.js";
 import { buildEvidenceCatalog, EvidenceCatalogError, type EvidenceCatalogErrorCode } from "./evidence/catalog.js";
 import type { EvidenceCatalogResult } from "./evidence/types.js";
+import { composeTechnicalProfile, ProfileComposerError, type ProfileCompositionResult, type ProfileComposerErrorCode } from "./composer.js";
 
-export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED";
+export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED";
 export type RunStatus = "configured" | "ready" | "partial" | "failed";
 
 export interface RunContext {
@@ -34,9 +35,9 @@ export interface RunContext {
   status: RunStatus;
 }
 
-export interface EvidenceCompletedDiagnostic {
+export interface CompositionCompletedDiagnostic {
   level: "info" | "error";
-  event: "evidence_completed" | "filter_blocked";
+  event: "composition_completed" | "filter_blocked";
   runId: string;
   normalizedRepositoryId: string;
   repositoryId: number;
@@ -59,12 +60,14 @@ export interface EvidenceCompletedDiagnostic {
   coverageEntryCount: number;
   conflictingEvidenceCount: number;
   catalogIssueCount: number;
-  fromStage: "ANALYZED";
-  toStage: "EVIDENCED";
+  candidateSha256: string;
+  schemaVersion: number;
+  fromStage: "EVIDENCED";
+  toStage: "COMPOSED";
   status: RunStatus;
 }
 
-export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode;
+export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
 
 export interface CoordinatorError {
   code: CoordinatorErrorCode;
@@ -83,7 +86,7 @@ export interface CoordinatorFailureDiagnostic {
 }
 
 export type CoordinatorResult =
-  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; diagnostic: EvidenceCompletedDiagnostic }
+  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; diagnostic: CompositionCompletedDiagnostic }
   | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult };
 
 export interface CoordinatorDependencies {
@@ -166,11 +169,12 @@ export async function coordinateRun(
 
     const analysis = runTechnologyAnalyzers(filtered, DEFAULT_TECHNOLOGY_ANALYZERS);
     const evidenceCatalog = buildEvidenceCatalog(filtered, analysis, { repositoryFullName: repository.fullName });
+    const composition = composeTechnicalProfile(evidenceCatalog);
     const hasPartialEvidence = collection.status === "partial" || filtered.status === "partial" ||
       analysis.issues.length > 0 || evidenceCatalog.issues.length > 0;
     const evidencedContext: RunContext = {
       ...context,
-      stage: "EVIDENCED",
+      stage: "COMPOSED",
       status: hasPartialEvidence ? "partial" : context.status,
     };
 
@@ -181,9 +185,10 @@ export async function coordinateRun(
       filtered,
       analysis,
       evidenceCatalog,
+      composition,
       diagnostic: {
         level: "info",
-        event: "evidence_completed",
+        event: "composition_completed",
         runId,
         normalizedRepositoryId: repository.normalizedRepositoryId,
         repositoryId: repository.repositoryId,
@@ -205,9 +210,11 @@ export async function coordinateRun(
         coverageEntryCount: evidenceCatalog.coverage.length,
         conflictingEvidenceCount: evidenceCatalog.evidence.filter((item) => item.status === "Conflict").length,
         catalogIssueCount: evidenceCatalog.issues.length,
+        candidateSha256: composition.candidateSha256,
+        schemaVersion: composition.schemaVersion,
         executionContext: evidencedContext.executionContext,
-        fromStage: "ANALYZED",
-        toStage: "EVIDENCED",
+        fromStage: "EVIDENCED",
+        toStage: "COMPOSED",
         status: evidencedContext.status,
       },
     };
@@ -216,6 +223,10 @@ export async function coordinateRun(
       const code = error.code;
       const failure = createFailure(code, error.message, 0, runId, configuration.normalizedRepositoryId);
       return { ...failure, context: { ...readyContext, stage: "ANALYZED", status: "failed" } };
+    }
+    if (error instanceof ProfileComposerError) {
+      const failure = createFailure(error.code, error.message, 0, runId, configuration.normalizedRepositoryId);
+      return { ...failure, context: { ...readyContext, stage: "EVIDENCED", status: "failed" } };
     }
     const failure = error instanceof RepositoryCollectionError
       ? createFailure(error.code, error.message, error.retryCount, runId, configuration.normalizedRepositoryId)
