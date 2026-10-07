@@ -92,7 +92,7 @@ test("moves through collection and filtering using one immutable snapshot", asyn
     return;
   }
 
-  assert.equal(result.context.stage, "EVIDENCED");
+  assert.equal(result.context.stage, "COMPOSED");
   assert.equal(result.context.status, "ready");
   assert.equal(result.context.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.equal(result.filtered.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
@@ -104,14 +104,18 @@ test("moves through collection and filtering using one immutable snapshot", asyn
   assert.equal(result.evidenceCatalog.coverage.length, 16);
   assert.equal(result.evidenceCatalog.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.ok(result.evidenceCatalog.evidence.some((item) => item.sourceType === "github_metadata" && item.fact.name === "Repository"));
+  assert.equal(result.composition.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
+  assert.equal(result.composition.schemaVersion, 1);
+  assert.equal(result.composition.candidateSha256.length, 64);
+  assert.match(result.composition.candidate, /^# Technical Profile\n/);
   assert.equal("collection" in result, false);
   assert.equal(result.repository.defaultBranch, "trunk");
   assert.equal(result.diagnostic.defaultBranch, "trunk");
   assert.equal(result.diagnostic.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.equal(result.diagnostic.profilePresent, false);
-  assert.equal(result.diagnostic.event, "evidence_completed");
-  assert.equal(result.diagnostic.fromStage, "ANALYZED");
-  assert.equal(result.diagnostic.toStage, "EVIDENCED");
+  assert.equal(result.diagnostic.event, "composition_completed");
+  assert.equal(result.diagnostic.fromStage, "EVIDENCED");
+  assert.equal(result.diagnostic.toStage, "COMPOSED");
   assert.equal(result.diagnostic.coverageEntryCount, 16);
 });
 
@@ -148,7 +152,7 @@ test("returns observations from sanitized snapshot files through coordinator int
   if (!result.ok) {
     return;
   }
-  assert.equal(result.context.stage, "EVIDENCED");
+  assert.equal(result.context.stage, "COMPOSED");
   assert.equal(result.analysis.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.ok(result.analysis.observations.some((observation) =>
     observation.category === "package_name" && observation.value === "coordinator-fixture"));
@@ -156,6 +160,7 @@ test("returns observations from sanitized snapshot files through coordinator int
     observation.category === "node_engine_constraint" && observation.value === ">=20"));
   assert.ok(result.evidenceCatalog.evidence.some((item) =>
     item.profileField === "Application Name" && item.fact.value === "coordinator-fixture"));
+  assert.ok(result.composition.candidate.includes("coordinator-fixture"));
 });
 
 test("blocks when the default local scanner is unavailable", async () => {
