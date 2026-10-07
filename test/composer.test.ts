@@ -156,16 +156,25 @@ test("renders conflicts, unsupported facts, limitations, and traceable evidence 
     authorityRelation: "overridden_by_authority",
     conflictsWith: [`E${6 .toString(16).toUpperCase().padStart(64, "0")}`],
   });
-  const unsupported = evidenceItem(6, "15", "Limitations / Missing Information", "Unsupported technology mention", "Python", {
+  const repositoryName = evidenceItem(6, "01", "Application Name", "Repository name", "sample/reconcile", {
+    fieldKey: "application_name",
+    sourceType: "github_metadata",
+    verificationBasis: "github_repository_metadata",
+    authority: "github_metadata",
+    authorityRelation: "authoritative",
+  });
+  const unsupported = evidenceItem(7, "15", "Limitations / Missing Information", "Unsupported technology mention", "Python", {
     fieldKey: "unsupported_technology:python",
     status: "Unable to Verify",
     confidence: "Low",
     verificationBasis: "unsupported_technology_mention",
     sourceType: "documentation",
   });
-  const output = composeTechnicalProfile(catalog([conflict, unsupported])).candidate;
+  const output = composeTechnicalProfile(catalog([conflict, repositoryName, unsupported])).candidate;
 
-  assert.match(tableBody(output, "01").body, /\| Application Name \| manifest-app \| Conflict \| E[0-9A-F]{64} \|/);
+  assert.match(tableBody(output, "01").body, /\| Application Name \| Conflicting evidence; see Evidence \/ Verification Status \| Conflict \| E[0-9A-F]{64}, E[0-9A-F]{64} \|/);
+  assert.ok(tableBody(output, "16").body.includes("manifest-app"));
+  assert.ok(tableBody(output, "16").body.includes("sample/reconcile"));
   assert.match(tableBody(output, "15").body, /Unsupported technology mention/);
   assert.match(tableBody(output, "15").body, /Unable to Verify/);
   assert.match(tableBody(output, "16").body, /Source type/);
