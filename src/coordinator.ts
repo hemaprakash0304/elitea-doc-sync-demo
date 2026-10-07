@@ -18,8 +18,13 @@ import { DEFAULT_TECHNOLOGY_ANALYZERS, runTechnologyAnalyzers, type TechnologyAn
 import { buildEvidenceCatalog, EvidenceCatalogError, type EvidenceCatalogErrorCode } from "./evidence/catalog.js";
 import type { EvidenceCatalogResult } from "./evidence/types.js";
 import { composeTechnicalProfile, ProfileComposerError, type ProfileCompositionResult, type ProfileComposerErrorCode } from "./composer.js";
+import {
+  reconcileTechnicalProfile,
+  type ProfileReconciliationResult,
+  type ReconciliationStatus,
+} from "./reconciler.js";
 
-export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED";
+export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED" | "RECONCILED";
 export type RunStatus = "configured" | "ready" | "partial" | "failed";
 
 export interface RunContext {
@@ -35,9 +40,9 @@ export interface RunContext {
   status: RunStatus;
 }
 
-export interface CompositionCompletedDiagnostic {
+export interface ReconciliationCompletedDiagnostic {
   level: "info" | "error";
-  event: "composition_completed" | "filter_blocked";
+  event: "reconciliation_completed" | "reconciliation_blocked";
   runId: string;
   normalizedRepositoryId: string;
   repositoryId: number;
@@ -62,12 +67,18 @@ export interface CompositionCompletedDiagnostic {
   catalogIssueCount: number;
   candidateSha256: string;
   schemaVersion: number;
-  fromStage: "EVIDENCED";
-  toStage: "COMPOSED";
+  reconciliationStatus: ReconciliationStatus;
+  additionCount: number;
+  modificationCount: number;
+  removalCount: number;
+  conflictCount: number;
+  preservedManualContent: boolean;
+  fromStage: "COMPOSED";
+  toStage: "RECONCILED";
   status: RunStatus;
 }
 
-export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
+export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | "RECONCILIATION_BLOCKED" | "RECONCILIATION_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
 
 export interface CoordinatorError {
   code: CoordinatorErrorCode;
@@ -77,7 +88,7 @@ export interface CoordinatorError {
 
 export interface CoordinatorFailureDiagnostic {
   level: "error";
-  event: "run_initialization_failed" | "filter_blocked";
+  event: "run_initialization_failed" | "filter_blocked" | "reconciliation_blocked";
   code: CoordinatorErrorCode;
   message: string;
   retryCount: number;
@@ -86,8 +97,8 @@ export interface CoordinatorFailureDiagnostic {
 }
 
 export type CoordinatorResult =
-  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; diagnostic: CompositionCompletedDiagnostic }
-  | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult };
+  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; reconciliation: ProfileReconciliationResult; diagnostic: ReconciliationCompletedDiagnostic }
+  | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult; reconciliation?: ProfileReconciliationResult };
 
 export interface CoordinatorDependencies {
   createRunId?: () => string;
@@ -170,11 +181,35 @@ export async function coordinateRun(
     const analysis = runTechnologyAnalyzers(filtered, DEFAULT_TECHNOLOGY_ANALYZERS);
     const evidenceCatalog = buildEvidenceCatalog(filtered, analysis, { repositoryFullName: repository.fullName });
     const composition = composeTechnicalProfile(evidenceCatalog);
+    const reconciliation = reconcileTechnicalProfile(filtered, collection.existingProfile, evidenceCatalog, composition);
+    if (reconciliation.status === "BLOCKED" || reconciliation.status === "FAILED") {
+      const blocked = reconciliation.status === "BLOCKED";
+      const code = blocked ? "RECONCILIATION_BLOCKED" : "RECONCILIATION_FAILED";
+      const message = blocked
+        ? "Existing profile ownership or security could not be established; approved content was preserved."
+        : "Profile reconciliation could not be completed safely; approved content was preserved.";
+      return {
+        ok: false,
+        error: { code, message, retryCount: 0 },
+        diagnostic: {
+          level: "error",
+          event: "reconciliation_blocked",
+          code,
+          message,
+          retryCount: 0,
+          runId,
+          normalizedRepositoryId: configuration.normalizedRepositoryId,
+        },
+        context: { ...context, stage: "RECONCILED", status: "failed" },
+        filtered,
+        reconciliation,
+      };
+    }
     const hasPartialEvidence = collection.status === "partial" || filtered.status === "partial" ||
       analysis.issues.length > 0 || evidenceCatalog.issues.length > 0;
     const evidencedContext: RunContext = {
       ...context,
-      stage: "COMPOSED",
+      stage: "RECONCILED",
       status: hasPartialEvidence ? "partial" : context.status,
     };
 
@@ -186,9 +221,10 @@ export async function coordinateRun(
       analysis,
       evidenceCatalog,
       composition,
+      reconciliation,
       diagnostic: {
         level: "info",
-        event: "composition_completed",
+        event: "reconciliation_completed",
         runId,
         normalizedRepositoryId: repository.normalizedRepositoryId,
         repositoryId: repository.repositoryId,
@@ -212,9 +248,15 @@ export async function coordinateRun(
         catalogIssueCount: evidenceCatalog.issues.length,
         candidateSha256: composition.candidateSha256,
         schemaVersion: composition.schemaVersion,
+        reconciliationStatus: reconciliation.status,
+        additionCount: reconciliation.additions.length,
+        modificationCount: reconciliation.modifications.length,
+        removalCount: reconciliation.removals.length,
+        conflictCount: reconciliation.conflicts.length,
+        preservedManualContent: reconciliation.preservedManualContent,
         executionContext: evidencedContext.executionContext,
-        fromStage: "EVIDENCED",
-        toStage: "COMPOSED",
+        fromStage: "COMPOSED",
+        toStage: "RECONCILED",
         status: evidencedContext.status,
       },
     };

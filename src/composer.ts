@@ -178,6 +178,14 @@ function singleValueRows(catalog: EvidenceCatalogResult, section: ProfileSection
   if (evidence.length === 0) {
     return [placeholderRow([rowName, "Not Specified"], emptyFieldStatus(catalog, section))];
   }
+  const distinctValues = new Set(evidence.map((item) => item.fact.value));
+  if (distinctValues.size > 1 || evidence.some((item) => item.status === "Conflict")) {
+    return [row(
+      [rowName, "Conflicting evidence; see Evidence / Verification Status"],
+      "Conflict",
+      evidence.map((item) => item.evidenceId),
+    )];
+  }
   return evidence.map((item) => row([rowName, item.fact.value], item.status, [item.evidenceId]));
 }
 
