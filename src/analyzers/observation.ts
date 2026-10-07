@@ -14,6 +14,7 @@ const SENSITIVE_VALUE_PATTERNS = [
   /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/,
   /\bAKIA[0-9A-Z]{16}\b/,
   /\b(?:password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret|private[_-]?key)\b\s*[:=]\s*["']?[^\s"',;]{8,}/i,
+  /(?:^|[^A-Za-z0-9])(?:[A-Za-z0-9]+[_-])?(?:token|secret|password|passwd|api[_-]?key)\s*[:=]\s*["']?[^\s"',;]{8,}/i,
   /\bBearer\s+[A-Za-z0-9._~+/-]{16,}/i,
   /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/i,
 ];
