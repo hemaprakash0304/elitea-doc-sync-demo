@@ -15,8 +15,10 @@ import {
   type SecretScanner,
 } from "./filter.js";
 import { DEFAULT_TECHNOLOGY_ANALYZERS, runTechnologyAnalyzers, type TechnologyAnalysisResult } from "./analyzers/index.js";
+import { buildEvidenceCatalog, EvidenceCatalogError, type EvidenceCatalogErrorCode } from "./evidence/catalog.js";
+import type { EvidenceCatalogResult } from "./evidence/types.js";
 
-export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED";
+export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED";
 export type RunStatus = "configured" | "ready" | "partial" | "failed";
 
 export interface RunContext {
@@ -32,9 +34,9 @@ export interface RunContext {
   status: RunStatus;
 }
 
-export interface AnalysisCompletedDiagnostic {
+export interface EvidenceCompletedDiagnostic {
   level: "info" | "error";
-  event: "analysis_completed" | "filter_blocked";
+  event: "evidence_completed" | "filter_blocked";
   runId: string;
   normalizedRepositoryId: string;
   repositoryId: number;
@@ -53,12 +55,16 @@ export interface AnalysisCompletedDiagnostic {
   executionContext: ExecutionContext;
   observationCount: number;
   analyzerIssueCount: number;
-  fromStage: "FILTERED";
-  toStage: "ANALYZED";
+  evidenceCount: number;
+  coverageEntryCount: number;
+  conflictingEvidenceCount: number;
+  catalogIssueCount: number;
+  fromStage: "ANALYZED";
+  toStage: "EVIDENCED";
   status: RunStatus;
 }
 
-export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason;
+export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode;
 
 export interface CoordinatorError {
   code: CoordinatorErrorCode;
@@ -77,7 +83,7 @@ export interface CoordinatorFailureDiagnostic {
 }
 
 export type CoordinatorResult =
-  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; diagnostic: AnalysisCompletedDiagnostic }
+  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; diagnostic: EvidenceCompletedDiagnostic }
   | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult };
 
 export interface CoordinatorDependencies {
@@ -159,17 +165,25 @@ export async function coordinateRun(
     }
 
     const analysis = runTechnologyAnalyzers(filtered, DEFAULT_TECHNOLOGY_ANALYZERS);
-    const analyzedContext: RunContext = { ...context, stage: "ANALYZED" };
+    const evidenceCatalog = buildEvidenceCatalog(filtered, analysis, { repositoryFullName: repository.fullName });
+    const hasPartialEvidence = collection.status === "partial" || filtered.status === "partial" ||
+      analysis.issues.length > 0 || evidenceCatalog.issues.length > 0;
+    const evidencedContext: RunContext = {
+      ...context,
+      stage: "EVIDENCED",
+      status: hasPartialEvidence ? "partial" : context.status,
+    };
 
     return {
       ok: true,
-      context: analyzedContext,
+      context: evidencedContext,
       repository,
       filtered,
       analysis,
+      evidenceCatalog,
       diagnostic: {
         level: "info",
-        event: "analysis_completed",
+        event: "evidence_completed",
         runId,
         normalizedRepositoryId: repository.normalizedRepositoryId,
         repositoryId: repository.repositoryId,
@@ -187,13 +201,22 @@ export async function coordinateRun(
         profileSafety: filtered.existingProfile.status,
         observationCount: analysis.observations.length,
         analyzerIssueCount: analysis.issues.length,
-        executionContext: analyzedContext.executionContext,
-        fromStage: "FILTERED",
-        toStage: "ANALYZED",
-        status: analyzedContext.status,
+        evidenceCount: evidenceCatalog.evidence.length,
+        coverageEntryCount: evidenceCatalog.coverage.length,
+        conflictingEvidenceCount: evidenceCatalog.evidence.filter((item) => item.status === "Conflict").length,
+        catalogIssueCount: evidenceCatalog.issues.length,
+        executionContext: evidencedContext.executionContext,
+        fromStage: "ANALYZED",
+        toStage: "EVIDENCED",
+        status: evidencedContext.status,
       },
     };
   } catch (error) {
+    if (error instanceof EvidenceCatalogError) {
+      const code = error.code;
+      const failure = createFailure(code, error.message, 0, runId, configuration.normalizedRepositoryId);
+      return { ...failure, context: { ...readyContext, stage: "ANALYZED", status: "failed" } };
+    }
     const failure = error instanceof RepositoryCollectionError
       ? createFailure(error.code, error.message, error.retryCount, runId, configuration.normalizedRepositoryId)
       : error instanceof GitHubReadError
