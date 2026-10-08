@@ -28,3 +28,77 @@ The workflow's built-in token has `contents: read` only and is used to check out
 The separate proposal App is installed only on the target repository and is configured independently. Configure the protected `docs-sync-proposal` Actions environment with required reviewer protection, set `DOCS_SYNC_PROPOSAL_APP_ID` and `DOCS_SYNC_PROPOSAL_APP_INSTALLATION_ID` as environment variables, and store `DOCS_SYNC_PROPOSAL_APP_PRIVATE_KEY` as an environment secret. Set `DOCS_SYNC_PROPOSAL_BRANCH_PROTECTION_CONFIRMED=true` only after verifying that the default branch requires human-approved PRs and the App has no bypass. The adapter requests only metadata read, contents write, and pull-requests write for the exact target. It creates a feature branch and PR for `technical-profile.md` only; it has no approve, merge, auto-merge, or default-branch-write operation. Missing or invalid proposal configuration blocks proposal creation. Write calls are single-attempt; ambiguous failures require operator inspection and a complete rerun.
 
 Local CLI runs have read access only and cannot create proposals. A proposal timeout or ambiguous write outcome is reported without automatic retries; rerun from a fresh snapshot after inspecting any branch/PR state. Same-target Actions workflow runs share a target-keyed concurrency group; GitHub Actions permits a pending run, so this serializes executions but is not a strict fail-fast distributed lock. The in-process lock additionally fails fast within one process. No live proposal credential, branch, or PR was used to verify the adapter; automated proposal tests use a fake HTTP transport.
+
+## Sample Target Repository
+
+### Customer Order Management API
+
+This sample Spring Boot application demonstrates automated technical documentation. It supports customer order processing and order status tracking.
+
+### Application Details
+
+- Application Name: Customer Order Management API
+- Service Owner: Digital Engineering Team
+- Business Impact: Supports customer order processing and order status tracking.
+- Version: 1.0.0
+
+### Technology Stack
+
+- Language: Java
+- Runtime: Java 17
+- Framework: Spring Boot 3.2.5
+- Build Tool: Maven
+- Database: PostgreSQL
+- ORM: Spring Data JPA
+
+### Infrastructure
+
+- Container Platform: Docker
+- Cloud Provider: AWS
+- Container Service: Amazon ECS
+
+### Integrations
+
+#### Upstream Dependencies
+
+- Customer Identity API
+
+#### Downstream Consumers
+
+- Order Tracking Portal
+
+### External APIs
+
+- Customer Identity API
+
+### Configuration
+
+The application uses environment variables for runtime configuration.
+
+Environment variable names:
+
+- DB_HOST
+- DB_PORT
+- DB_NAME
+- DB_USERNAME
+- ORDER_SERVICE_URL
+
+No credentials or secret values are stored in this repository.
+
+### Testing
+
+- Test Framework: JUnit 5
+- Test Support: Spring Boot Test
+
+### Observability
+
+- Logging: Spring Boot application logging
+- Monitoring: Not specified
+
+### Deployment
+
+The application is packaged as a Docker container and deployed to Amazon ECS.
+
+### Repository
+
+This repository contains the source and configuration used for the Customer Order Management API demonstration.
