@@ -80,7 +80,8 @@ export type CollectionErrorCode =
   | "TREE_RETRIEVAL_FAILED"
   | "FILE_RETRIEVAL_FAILED"
   | "INVALID_GITHUB_RESPONSE"
-  | "SNAPSHOT_INCONSISTENT";
+  | "SNAPSHOT_INCONSISTENT"
+  | "RUN_TIMEOUT";
 
 const SAFE_COLLECTION_MESSAGES: Record<CollectionErrorCode, string> = {
   REPOSITORY_NOT_FOUND: "Repository is unavailable to the configured read identity.",
@@ -96,6 +97,7 @@ const SAFE_COLLECTION_MESSAGES: Record<CollectionErrorCode, string> = {
   FILE_RETRIEVAL_FAILED: "A repository file could not be read from the selected snapshot.",
   INVALID_GITHUB_RESPONSE: "GitHub returned invalid data during repository collection.",
   SNAPSHOT_INCONSISTENT: "Repository data could not be bound to one immutable commit snapshot.",
+  RUN_TIMEOUT: "The repository collection exceeded its configured run deadline.",
 };
 
 export class RepositoryCollectionError extends Error {
@@ -114,6 +116,7 @@ export interface CollectionOptions {
   maxFiles?: number;
   maxFileBytes?: number;
   maxTextBytes?: number;
+  deadlineAtMs?: number;
 }
 
 const KNOWN_BINARY_EXTENSIONS = new Set([
@@ -122,7 +125,6 @@ const KNOWN_BINARY_EXTENSIONS = new Set([
   ".mov", ".mp3", ".mp4", ".o", ".p12", ".p7b", ".p7c", ".pem", ".pfx", ".png", ".ppk", ".so",
   ".tar", ".tgz", ".tif", ".tiff", ".war", ".wav", ".webp", ".woff", ".woff2", ".xls", ".xlsx", ".zip",
 ]);
-
 export async function collectRepositorySnapshot(
   configuration: RunConfiguration,
   repository: GitHubRepositoryMetadata,
@@ -130,7 +132,9 @@ export async function collectRepositorySnapshot(
   options: CollectionOptions = {},
 ): Promise<RepositoryCollectionResult> {
   const limits = resolveLimits(options);
+  assertDeadline(limits.deadlineAtMs);
   const snapshot = await resolveSnapshot(configuration, repository, client);
+  assertDeadline(limits.deadlineAtMs);
   let tree;
   try {
     tree = await client.getRepositoryTree(configuration, snapshot.treeSha);
@@ -159,6 +163,7 @@ export async function collectRepositorySnapshot(
   const collectedFiles: CollectedFile[] = [];
 
   for (const entry of selectedEntries) {
+    assertDeadline(limits.deadlineAtMs);
     const file = createMetadata(entry, snapshot.commitSha);
     if (file.kind === "symlink") {
       file.contentStatus = "symlink_not_followed";
@@ -196,6 +201,7 @@ export async function collectRepositorySnapshot(
     reservedTextBytes += file.size;
     try {
       const blob = await client.getGitBlob(configuration, file.blobSha as string);
+      assertDeadline(limits.deadlineAtMs);
       readRetryCount += blob.readRetryCount;
       if (blob.sha !== file.blobSha || blob.size !== file.size) {
         throw new RepositoryCollectionError("SNAPSHOT_INCONSISTENT");
@@ -381,7 +387,14 @@ function resolveLimits(options: CollectionOptions) {
     maxFiles: boundedLimit(options.maxFiles, MAX_COLLECTION_FILES),
     maxFileBytes: boundedLimit(options.maxFileBytes, MAX_COLLECTION_FILE_BYTES),
     maxTextBytes: boundedLimit(options.maxTextBytes, MAX_COLLECTION_TEXT_BYTES),
+    ...(Number.isFinite(options.deadlineAtMs) ? { deadlineAtMs: options.deadlineAtMs } : {}),
   };
+}
+
+function assertDeadline(deadlineAtMs: number | undefined): void {
+  if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
+    throw new RepositoryCollectionError("RUN_TIMEOUT");
+  }
 }
 
 function boundedLimit(value: number | undefined, approvedLimit: number): number {

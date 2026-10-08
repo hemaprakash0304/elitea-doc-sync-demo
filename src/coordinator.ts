@@ -38,6 +38,12 @@ import {
   type ProposalWriteClient,
 } from "./proposal.js";
 import { createSanitizedRunReport, type SanitizedRunReport } from "./report.js";
+import {
+  OperationalTimeoutError,
+  resolveOperationalLimits,
+  tryAcquireProposalRunLock,
+  type OperationalLimitOverrides,
+} from "./operations.js";
 
 export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED" | "RECONCILED" | "VALIDATED" | "GATE_CHECKED" | "PROPOSED";
 export type RunStatus = "configured" | "ready" | "partial" | "failed";
@@ -106,7 +112,7 @@ export interface ProposalCompletedDiagnostic {
   status: RunStatus;
 }
 
-export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | "RECONCILIATION_BLOCKED" | "RECONCILIATION_FAILED" | "VALIDATION_BLOCKED" | "VALIDATION_FAILED" | "GATE_BLOCKED" | "PROPOSAL_BLOCKED" | "PROPOSAL_STALE" | "PROPOSAL_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
+export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | "BUSY" | "RECONCILIATION_BLOCKED" | "RECONCILIATION_FAILED" | "VALIDATION_BLOCKED" | "VALIDATION_FAILED" | "GATE_BLOCKED" | "PROPOSAL_BLOCKED" | "PROPOSAL_STALE" | "PROPOSAL_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
 
 export interface CoordinatorError {
   code: CoordinatorErrorCode;
@@ -116,7 +122,7 @@ export interface CoordinatorError {
 
 export interface CoordinatorFailureDiagnostic {
   level: "error";
-  event: "run_initialization_failed" | "filter_blocked" | "reconciliation_blocked" | "gate_blocked" | "proposal_blocked";
+  event: "run_initialization_failed" | "busy" | "run_timeout" | "filter_blocked" | "reconciliation_blocked" | "gate_blocked" | "proposal_blocked";
   code: CoordinatorErrorCode;
   message: string;
   retryCount: number;
@@ -139,6 +145,7 @@ export interface CoordinatorDependencies {
   automatedTests?: AutomatedTestResult | ((binding: AutomatedTestBinding, signal: AbortSignal) => AutomatedTestResult | Promise<AutomatedTestResult>);
   automatedTestTimeoutMs?: number;
   proposalWriteClient?: ProposalWriteClient;
+  operationalLimits?: OperationalLimitOverrides;
 }
 
 const ALLOWED_CONFIGURATION_KEYS = new Set([
@@ -155,16 +162,45 @@ export async function coordinateRun(
   configuration: unknown,
   dependencies: CoordinatorDependencies = {},
 ): Promise<CoordinatorResult> {
-  const result = await executeCoordinatorRun(configuration, dependencies);
-  return {
-    ...result,
-    report: createSanitizedRunReport(result, completionTimestamp(dependencies)),
-  };
+  const operationalLimits = resolveOperationalLimits(dependencies.operationalLimits);
+  let releaseProposalRun: (() => void) | undefined;
+  if (dependencies.proposalWriteClient !== undefined && isRunConfiguration(configuration)) {
+    releaseProposalRun = tryAcquireProposalRunLock(configuration.normalizedRepositoryId);
+    if (releaseProposalRun === undefined) {
+      const runId = `run-${randomUUID()}`;
+      const now = dependencies.now ?? (() => new Date());
+      const candidateStart = now();
+      const startedAt = candidateStart instanceof Date && Number.isFinite(candidateStart.getTime()) ? candidateStart : new Date();
+      const message = "A proposal-capable run is already active for this repository.";
+      const result: CoordinatorExecutionResult = {
+        ok: false,
+        error: { code: "BUSY", message, retryCount: 0 },
+        diagnostic: {
+          level: "error",
+          event: "busy",
+          code: "BUSY",
+          message,
+          retryCount: 0,
+          runId,
+          normalizedRepositoryId: configuration.normalizedRepositoryId,
+        },
+        context: createRunContext(configuration, runId, startedAt, "CONFIGURED", "failed"),
+      };
+      return { ...result, report: createSanitizedRunReport(result, completionTimestamp(dependencies)) };
+    }
+  }
+  try {
+    const result = await executeCoordinatorRun(configuration, dependencies, operationalLimits);
+    return { ...result, report: createSanitizedRunReport(result, completionTimestamp(dependencies)) };
+  } finally {
+    releaseProposalRun?.();
+  }
 }
 
 async function executeCoordinatorRun(
   configuration: unknown,
   dependencies: CoordinatorDependencies,
+  operationalLimits: ReturnType<typeof resolveOperationalLimits>,
 ): Promise<CoordinatorExecutionResult> {
   if (!isRunConfiguration(configuration)) {
     return createFailure("INVALID_CONFIGURATION", INVALID_CONFIGURATION_MESSAGE);
@@ -186,22 +222,35 @@ async function executeCoordinatorRun(
 
   const configuredContext = createRunContext(configuration, runId, startedAt, "CONFIGURED", "configured");
   const readyContext = createRunContext(configuration, runId, startedAt, "READY_FOR_COLLECTION", "ready");
+  const deadlineAtMs = Date.now() + operationalLimits.overallRunTimeoutMs;
+  let stageContext = readyContext;
   try {
+    assertRunDeadline(deadlineAtMs, "COLLECTION");
     const client = dependencies.githubClient ??
       (dependencies.createGitHubClient ?? createGitHubReadClient)(configuration.executionContext);
     const repository = await client.getRepositoryMetadata(configuration);
-    const collection = await collectRepositorySnapshot(configuration, repository, client);
+    const collection = await collectRepositorySnapshot(configuration, repository, client, { deadlineAtMs });
+    assertRunDeadline(deadlineAtMs, "COLLECTION");
     const collectedContext = createRunContext(configuration, runId, startedAt, "COLLECTED", "ready", {
       defaultBranch: collection.defaultBranch,
       snapshotCommitSha: collection.snapshotCommitSha,
     });
-    const filtered = await filterRepositorySnapshot(collection, dependencies.secretScanner ?? new UnavailableSecretScanner());
+    stageContext = collectedContext;
+    assertRunDeadline(deadlineAtMs, "FILTERING");
+    const filterTimeoutMs = Math.min(operationalLimits.scannerTimeoutMs, deadlineAtMs - Date.now());
+    const filtered = await filterRepositorySnapshot(
+      collection,
+      dependencies.secretScanner ?? new UnavailableSecretScanner(),
+      { scannerTimeoutMs: filterTimeoutMs },
+    );
+    assertRunDeadline(deadlineAtMs, "FILTERING");
     const isPartial = filtered.status === "partial" || collection.status === "partial";
     const context: RunContext = {
       ...collectedContext,
       stage: "FILTERED",
       status: isPartial ? "partial" : "ready",
     };
+    stageContext = context;
     if (filtered.status === "blocked") {
       const code = filtered.blockingReason ?? "SCANNER_FAILED";
       const message = filterFailureMessage(code);
@@ -223,9 +272,13 @@ async function executeCoordinatorRun(
     }
 
     const analysis = runTechnologyAnalyzers(filtered, DEFAULT_TECHNOLOGY_ANALYZERS);
+    assertRunDeadline(deadlineAtMs, "ANALYSIS");
     const evidenceCatalog = buildEvidenceCatalog(filtered, analysis, { repositoryFullName: repository.fullName });
+    assertRunDeadline(deadlineAtMs, "EVIDENCE");
     const composition = composeTechnicalProfile(evidenceCatalog);
+    assertRunDeadline(deadlineAtMs, "COMPOSITION");
     const reconciliation = reconcileTechnicalProfile(filtered, collection.existingProfile, evidenceCatalog, composition);
+    assertRunDeadline(deadlineAtMs, "RECONCILIATION");
     if (reconciliation.status === "BLOCKED" || reconciliation.status === "FAILED") {
       const blocked = reconciliation.status === "BLOCKED";
       const code = blocked ? "RECONCILIATION_BLOCKED" : "RECONCILIATION_FAILED";
@@ -249,12 +302,16 @@ async function executeCoordinatorRun(
         reconciliation,
       };
     }
+    stageContext = { ...context, stage: "RECONCILED" };
+    assertRunDeadline(deadlineAtMs, "VALIDATION");
+    const validationScannerTimeoutMs = Math.min(operationalLimits.scannerTimeoutMs, deadlineAtMs - Date.now());
     const validation = await validateReconciledCandidate({
       filtered,
       catalog: evidenceCatalog,
       composition,
       reconciliation,
       scanner: dependencies.secretScanner ?? new UnavailableSecretScanner(),
+      scannerTimeoutMs: validationScannerTimeoutMs,
     });
     const testBinding = createAutomatedTestBinding({
       runId,
@@ -263,7 +320,16 @@ async function executeCoordinatorRun(
       composition,
       reconciliation,
     });
-    const automatedTests = await resolveAutomatedTests(dependencies, testBinding);
+    assertRunDeadline(deadlineAtMs, "VALIDATION");
+    stageContext = { ...context, stage: "VALIDATED" };
+    assertRunDeadline(deadlineAtMs, "GATE");
+    const remainingTestTimeoutMs = Math.max(1, deadlineAtMs - Date.now());
+    const automatedTests = await resolveAutomatedTests(
+      dependencies,
+      testBinding,
+      Math.min(operationalLimits.overallRunTimeoutMs, remainingTestTimeoutMs),
+    );
+    assertRunDeadline(deadlineAtMs, "GATE");
     const gate = evaluateMandatoryGate({
       runId,
       configuration,
@@ -277,6 +343,7 @@ async function executeCoordinatorRun(
       ...(dependencies.secretScanner?.version === undefined ? {} : { scannerVersion: dependencies.secretScanner.version }),
       changedFilePaths: reconciliation.status === "NO_CHANGES" ? [] : [TECHNICAL_PROFILE_PATH],
     });
+    stageContext = { ...context, stage: "GATE_CHECKED" };
     if (gate.status !== "PASS" || gate.proposalAuthorization === undefined) {
       const message = "Mandatory validation, security, and automated-test checks did not all pass; no proposal capability was authorized.";
       return {
@@ -291,12 +358,13 @@ async function executeCoordinatorRun(
           runId,
           normalizedRepositoryId: configuration.normalizedRepositoryId,
         },
-        context: { ...context, stage: "GATE_CHECKED", status: "failed" },
+        context: { ...stageContext, status: "failed" },
         filtered,
         validation,
         gate,
       };
     }
+    assertRunDeadline(deadlineAtMs, "PROPOSAL");
     const proposal = await submitTechnicalProfileProposal({
       runId,
       configuration,
@@ -308,9 +376,12 @@ async function executeCoordinatorRun(
       gate,
       authorization: gate.proposalAuthorization,
       ...(dependencies.secretScanner?.version === undefined ? {} : { scannerVersion: dependencies.secretScanner.version }),
+      proposalOperationTimeoutMs: Math.min(operationalLimits.proposalOperationTimeoutMs, Math.max(1, deadlineAtMs - Date.now())),
+      deadlineAtMs,
       readClient: client,
       ...(dependencies.proposalWriteClient === undefined ? {} : { writeClient: dependencies.proposalWriteClient }),
     });
+    assertRunDeadline(deadlineAtMs, "PROPOSAL");
     if (proposal.status !== "CREATED" && proposal.status !== "NO_CHANGES") {
       const stale = proposal.status === "STALE";
       const code = stale ? "PROPOSAL_STALE" : proposal.status === "BLOCKED" ? "PROPOSAL_BLOCKED" : "PROPOSAL_FAILED";
@@ -410,6 +481,24 @@ async function executeCoordinatorRun(
       },
     };
   } catch (error) {
+    if (error instanceof OperationalTimeoutError ||
+      (error instanceof RepositoryCollectionError && error.code === "RUN_TIMEOUT")) {
+      const message = "The run exceeded its configured execution deadline; no further stage was started.";
+      return {
+        ok: false,
+        error: { code: "RUN_TIMEOUT", message, retryCount: 0 },
+        diagnostic: {
+          level: "error",
+          event: "run_timeout",
+          code: "RUN_TIMEOUT",
+          message,
+          retryCount: 0,
+          runId,
+          normalizedRepositoryId: configuration.normalizedRepositoryId,
+        },
+        context: { ...stageContext, status: "failed" },
+      };
+    }
     if (error instanceof EvidenceCatalogError) {
       const code = error.code;
       const failure = createFailure(code, error.message, 0, runId, configuration.normalizedRepositoryId);
@@ -445,13 +534,15 @@ const AUTOMATED_TEST_TIMEOUT = Symbol("automated-test-timeout");
 async function resolveAutomatedTests(
   dependencies: CoordinatorDependencies,
   binding: AutomatedTestBinding,
+  maximumTimeoutMs: number,
 ): Promise<AutomatedTestResult | undefined> {
   const result = dependencies.automatedTests;
   if (result === undefined || typeof result !== "function") {
     return result;
   }
-  const timeoutMs = dependencies.automatedTestTimeoutMs;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs === undefined || timeoutMs < 1) {
+  const configuredTimeoutMs = dependencies.automatedTestTimeoutMs ?? maximumTimeoutMs;
+  const timeoutMs = Math.min(configuredTimeoutMs, maximumTimeoutMs);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
     return { status: "INDETERMINATE", binding };
   }
 
@@ -483,6 +574,8 @@ function filterFailureMessage(code: FilterBlockingReason): string {
       return "The required local secret scanner is unavailable; analysis was blocked.";
     case "SCANNER_FAILED":
       return "The local secret scan failed; analysis was blocked.";
+    case "SCANNER_TIMEOUT":
+      return "The local secret scan timed out; analysis was blocked.";
     case "SCAN_INCOMPLETE":
       return "The local secret scan did not cover all eligible input; analysis was blocked.";
     case "INVALID_SCAN_RESULT":
@@ -568,4 +661,10 @@ function createFailure(
       ...(normalizedRepositoryId === undefined ? {} : { normalizedRepositoryId }),
     },
   };
+}
+
+function assertRunDeadline(deadlineAtMs: number, stage: string): void {
+  if (Date.now() >= deadlineAtMs) {
+    throw new OperationalTimeoutError(stage);
+  }
 }

@@ -5,6 +5,7 @@ import type { GitHubCommitSnapshot, GitHubReadClient, GitHubRepositoryMetadata }
 import type { ProfileCompositionResult } from "./composer.js";
 import type { RepositoryFilterResult } from "./filter.js";
 import type { ProfileReconciliationResult } from "./reconciler.js";
+import { OperationalTimeoutError, resolveOperationalLimits, withFiniteTimeout } from "./operations.js";
 import {
   AUTOMATED_TEST_SUITE_VERSION,
   isGatePassBoundTo,
@@ -36,6 +37,7 @@ export type ProposalFailureCode =
   | "BRANCH_VERIFY_FAILED"
   | "PULL_REQUEST_FAILED"
   | "PULL_REQUEST_RESPONSE_INVALID"
+  | "PROPOSAL_TIMED_OUT"
   | "STALE_PULL_REQUEST_CLOSED"
   | "STALE_PULL_REQUEST_CLOSE_FAILED";
 
@@ -88,6 +90,7 @@ export interface ProposalWriteClient {
     branchName: string;
     baseBranch: string;
     baseCommitSha: string;
+    signal: AbortSignal;
   }): Promise<ProposalBranchResult>;
   commitSingleProfileFile(input: {
     repositoryId: number;
@@ -98,11 +101,13 @@ export interface ProposalWriteClient {
     path: typeof TECHNICAL_PROFILE_PATH;
     content: string;
     commitMessage: "docs: update technical profile";
+    signal: AbortSignal;
   }): Promise<ProposalCommitResult>;
   getBranchHead(input: {
     repositoryId: number;
     repositoryFullName: string;
     branchName: string;
+    signal: AbortSignal;
   }): Promise<{ branchName: string; commitSha: string }>;
   createPullRequest(input: {
     repositoryId: number;
@@ -111,11 +116,13 @@ export interface ProposalWriteClient {
     baseBranch: string;
     title: "docs: update technical profile";
     body: string;
+    signal: AbortSignal;
   }): Promise<ProposalPullRequestResult>;
   closePullRequest(input: {
     repositoryId: number;
     repositoryFullName: string;
     pullRequestNumber: number;
+    signal: AbortSignal;
   }): Promise<boolean>;
 }
 
@@ -130,6 +137,8 @@ export interface ProposalInput {
   gate: MandatoryGateResult;
   authorization?: ProposalAuthorization;
   scannerVersion?: string;
+  proposalOperationTimeoutMs?: number;
+  deadlineAtMs?: number;
   readClient: GitHubReadClient;
   writeClient?: ProposalWriteClient;
 }
@@ -190,15 +199,16 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
   const branchName = proposalBranchName(input.runId, candidateSha256);
   let branch: ProposalBranchResult;
   try {
-    branch = await writer.createFeatureBranch({
+    branch = await withProposalTimeout(input, "PROPOSAL_BRANCH", (signal) => writer.createFeatureBranch({
       repositoryId: input.repository.repositoryId,
       repositoryFullName: input.repository.fullName,
       branchName,
       baseBranch: input.repository.defaultBranch,
       baseCommitSha: input.snapshot.commitSha,
-    });
-  } catch {
-    return { ...base, status: "FAILED", changedFiles: [], failureCode: "BRANCH_CREATE_FAILED" };
+      signal,
+    }));
+  } catch (error) {
+    return { ...base, status: "FAILED", changedFiles: [], failureCode: proposalFailureFromError(error, "BRANCH_CREATE_FAILED") };
   }
   if (branch === null || typeof branch !== "object") {
     return { ...base, status: "FAILED", changedFiles: [], branchName, failureCode: "BRANCH_CREATE_FAILED" };
@@ -212,7 +222,7 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
 
   let commit: ProposalCommitResult;
   try {
-    commit = await writer.commitSingleProfileFile({
+    commit = await withProposalTimeout(input, "PROPOSAL_COMMIT", (signal) => writer.commitSingleProfileFile({
       repositoryId: input.repository.repositoryId,
       repositoryFullName: input.repository.fullName,
       branchName,
@@ -221,9 +231,10 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
       path: TECHNICAL_PROFILE_PATH,
       content: candidate as string,
       commitMessage: "docs: update technical profile",
-    });
-  } catch {
-    return { ...base, status: "FAILED", changedFiles: [], branchName, failureCode: "COMMIT_FAILED" };
+      signal,
+    }));
+  } catch (error) {
+    return { ...base, status: "FAILED", changedFiles: [], branchName, failureCode: proposalFailureFromError(error, "COMMIT_FAILED") };
   }
   if (commit === null || typeof commit !== "object" || !validCommitResult(commit, input, candidateSha256)) {
     return {
@@ -238,13 +249,14 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
 
   let branchHead: { branchName: string; commitSha: string };
   try {
-    branchHead = await writer.getBranchHead({
+    branchHead = await withProposalTimeout(input, "PROPOSAL_BRANCH_VERIFY", (signal) => writer.getBranchHead({
       repositoryId: input.repository.repositoryId,
       repositoryFullName: input.repository.fullName,
       branchName,
-    });
-  } catch {
-    return { ...base, status: "FAILED", changedFiles: [TECHNICAL_PROFILE_PATH], branchName, commitSha: commit.commitSha, failureCode: "BRANCH_VERIFY_FAILED" };
+      signal,
+    }));
+  } catch (error) {
+    return { ...base, status: "FAILED", changedFiles: [TECHNICAL_PROFILE_PATH], branchName, commitSha: commit.commitSha, failureCode: proposalFailureFromError(error, "BRANCH_VERIFY_FAILED") };
   }
   if (
     branchHead === null || typeof branchHead !== "object" ||
@@ -267,16 +279,17 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
 
   let pullRequest: ProposalPullRequestResult;
   try {
-    pullRequest = await writer.createPullRequest({
+    pullRequest = await withProposalTimeout(input, "PROPOSAL_PULL_REQUEST", (signal) => writer.createPullRequest({
       repositoryId: input.repository.repositoryId,
       repositoryFullName: input.repository.fullName,
       headBranch: branchName,
       baseBranch: input.repository.defaultBranch,
       title: "docs: update technical profile",
       body: pullRequestBody(input, candidateSha256),
-    });
-  } catch {
-    return { ...base, status: "FAILED", changedFiles: [TECHNICAL_PROFILE_PATH], branchName, commitSha: commit.commitSha, failureCode: "PULL_REQUEST_FAILED" };
+      signal,
+    }));
+  } catch (error) {
+    return { ...base, status: "FAILED", changedFiles: [TECHNICAL_PROFILE_PATH], branchName, commitSha: commit.commitSha, failureCode: proposalFailureFromError(error, "PULL_REQUEST_FAILED") };
   }
   if (
     pullRequest === null || typeof pullRequest !== "object" ||
@@ -284,11 +297,12 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
   ) {
     if (isClosableProposalPullRequest(pullRequest, branchName, input.repository.fullName)) {
       try {
-        await writer.closePullRequest({
+        await withProposalTimeout(input, "PROPOSAL_CLOSE", (signal) => writer.closePullRequest({
           repositoryId: input.repository.repositoryId,
           repositoryFullName: input.repository.fullName,
           pullRequestNumber: pullRequest.number,
-        });
+          signal,
+        }));
       } catch {
       }
     }
@@ -306,11 +320,12 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
   if (afterPullRequest.status === "STALE") {
     let closed = false;
     try {
-      closed = await writer.closePullRequest({
+      closed = await withProposalTimeout(input, "PROPOSAL_CLOSE", (signal) => writer.closePullRequest({
         repositoryId: input.repository.repositoryId,
         repositoryFullName: input.repository.fullName,
         pullRequestNumber: pullRequest.number,
-      });
+        signal,
+      }));
     } catch {
       closed = false;
     }
@@ -473,11 +488,13 @@ function validateWriteCapability(
 type CurrentSnapshotResult =
   | { status: "CURRENT"; metadata: GitHubRepositoryMetadata; snapshot: GitHubCommitSnapshot }
   | { status: "STALE" }
-  | { status: "FAILED"; code: "SNAPSHOT_BINDING_MISMATCH" };
+  | { status: "FAILED"; code: "SNAPSHOT_BINDING_MISMATCH" | "PROPOSAL_TIMED_OUT" };
 
 async function readCurrentDefaultBranch(input: ProposalInput): Promise<CurrentSnapshotResult> {
   try {
+    assertProposalDeadline(input);
     const metadata = await input.readClient.getRepositoryMetadata(input.configuration);
+    assertProposalDeadline(input);
     if (
       metadata.normalizedRepositoryId.toLowerCase() !== input.configuration.normalizedRepositoryId.toLowerCase() ||
       metadata.repositoryId !== input.repository.repositoryId ||
@@ -489,6 +506,7 @@ async function readCurrentDefaultBranch(input: ProposalInput): Promise<CurrentSn
       return { status: "STALE" };
     }
     const snapshot = await input.readClient.getDefaultBranchCommit(input.configuration, metadata.defaultBranch);
+    assertProposalDeadline(input);
     if (snapshot.branch !== metadata.defaultBranch || !isGitSha(snapshot.commitSha) || !isGitSha(snapshot.treeSha)) {
       return { status: "FAILED", code: "SNAPSHOT_BINDING_MISMATCH" };
     }
@@ -499,9 +517,36 @@ async function readCurrentDefaultBranch(input: ProposalInput): Promise<CurrentSn
       return { status: "STALE" };
     }
     return { status: "CURRENT", metadata, snapshot };
-  } catch {
+  } catch (error) {
+    if (error instanceof OperationalTimeoutError) {
+      return { status: "FAILED", code: "PROPOSAL_TIMED_OUT" };
+    }
     return { status: "FAILED", code: "SNAPSHOT_BINDING_MISMATCH" };
   }
+}
+
+async function withProposalTimeout<T>(
+  input: ProposalInput,
+  stage: string,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  assertProposalDeadline(input);
+  const limits = resolveOperationalLimits(input.proposalOperationTimeoutMs === undefined
+    ? {}
+    : { proposalOperationTimeoutMs: input.proposalOperationTimeoutMs });
+  const remaining = input.deadlineAtMs === undefined ? limits.proposalOperationTimeoutMs : input.deadlineAtMs - Date.now();
+  if (remaining <= 0) throw new OperationalTimeoutError(stage);
+  return withFiniteTimeout(operation, Math.min(limits.proposalOperationTimeoutMs, remaining), stage);
+}
+
+function assertProposalDeadline(input: ProposalInput): void {
+  if (input.deadlineAtMs !== undefined && Date.now() >= input.deadlineAtMs) {
+    throw new OperationalTimeoutError("PROPOSAL");
+  }
+}
+
+function proposalFailureFromError(error: unknown, fallback: ProposalFailureCode): ProposalFailureCode {
+  return error instanceof OperationalTimeoutError ? "PROPOSAL_TIMED_OUT" : fallback;
 }
 
 function validCommitResult(

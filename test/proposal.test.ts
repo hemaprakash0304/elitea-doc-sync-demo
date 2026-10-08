@@ -49,8 +49,8 @@ const SCANNER_VERSION = "test-double/1";
 const TEST_RESULT_BASE = {
   status: "PASS" as const,
   suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-  totalTests: 195,
-  passedTests: 195,
+  totalTests: 201,
+  passedTests: 201,
   failedTests: 0,
   skippedTests: 0,
 };
@@ -507,4 +507,23 @@ test("closes an attributable PR response that targets the wrong base branch", as
   assert.equal(result.status, "FAILED");
   assert.equal(result.failureCode, "PULL_REQUEST_RESPONSE_INVALID");
   assert.equal(input.writeClient.calls.some((call) => call.method === "closePullRequest"), true);
+});
+
+test("aborts a timed-out proposal write without retrying it", async () => {
+  const input = await makeProposalInput();
+  input.proposalOperationTimeoutMs = 100;
+  let receivedSignal: AbortSignal | undefined;
+  input.writeClient.createFeatureBranch = async (request) => {
+    input.writeClient.calls.push({ method: "createFeatureBranch", input: request });
+    receivedSignal = request.signal;
+    return new Promise<ProposalBranchResult>(() => undefined);
+  };
+
+  const result = await submitTechnicalProfileProposal(input);
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.failureCode, "PROPOSAL_TIMED_OUT");
+  assert.equal(input.writeClient.calls.filter((call) => call.method === "createFeatureBranch").length, 1);
+  assert.equal(input.writeClient.calls.some((call) => call.method === "commitSingleProfileFile"), false);
+  assert.equal(receivedSignal?.aborted, true);
 });

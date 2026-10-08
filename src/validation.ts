@@ -95,6 +95,7 @@ export interface ValidationInput {
   composition: ProfileCompositionResult;
   reconciliation: ProfileReconciliationResult;
   scanner: SecretScanner;
+  scannerTimeoutMs?: number;
 }
 
 type MarkdownRow = string[];
@@ -180,7 +181,7 @@ export async function validateReconciledCandidate(input: ValidationInput): Promi
 
   let scannerResult: CandidateScanResult;
   try {
-    scannerResult = await scanCandidateContent(candidate, input.scanner);
+    scannerResult = await scanCandidateContent(candidate, input.scanner, input.scannerTimeoutMs);
   } catch {
     scannerResult = {
       status: "blocked",

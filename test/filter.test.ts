@@ -341,6 +341,21 @@ test("unavailable, failed, throwing, and incomplete scanners all fail closed", a
     assert.equal(result.blockingReason, "SCAN_INCOMPLETE");
     assert.deepEqual(result.analysisFiles, []);
   });
+
+  await t.test("scanner timeout blocks and returns only a typed timeout code", async () => {
+    const scanner: SecretScanner = {
+      id: "test_double",
+      executionBoundary: "local",
+      scan: async (_files, signal) => new Promise<SecretScanOutcome>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("SYNTHETIC_ONLY_TOKEN=TIMEOUT_VALUE")), { once: true });
+      }),
+    };
+    const result = await filterRepositorySnapshot(input, scanner, { scannerTimeoutMs: 5 });
+    assert.equal(result.status, "blocked");
+    assert.equal(result.blockingReason, "SCANNER_TIMEOUT");
+    assert.deepEqual(result.analysisFiles, []);
+    assert.doesNotMatch(JSON.stringify(result), /TIMEOUT_VALUE/);
+  });
 });
 
 test("orders analysis inputs and findings deterministically and preserves the snapshot SHA", async () => {

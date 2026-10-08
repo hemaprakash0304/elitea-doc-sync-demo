@@ -140,6 +140,8 @@ const REPORT_STAGES: readonly RunReportStageId[] = [
 const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   INVALID_CONFIGURATION: "Run configuration was invalid.",
   RUN_INITIALIZATION_FAILED: "The run could not be initialized safely.",
+  BUSY: "A proposal-capable run is already active for this repository.",
+  RUN_TIMEOUT: "The run exceeded its configured execution deadline.",
   REPOSITORY_NOT_FOUND: "The configured repository could not be read.",
   DEFAULT_BRANCH_COMMIT_MISSING: "The repository default-branch snapshot could not be read.",
   TREE_RETRIEVAL_FAILED: "The repository snapshot tree could not be read.",
@@ -160,6 +162,7 @@ const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   COLLECTION_INCOMPLETE: "Repository collection was incomplete.",
   SCANNER_UNAVAILABLE: "The required security scanner was unavailable.",
   SCANNER_FAILED: "The security scan failed.",
+  SCANNER_TIMEOUT: "The security scan timed out.",
   SCAN_INCOMPLETE: "The security scan did not cover all required inputs.",
   EXISTING_PROFILE_SECRET: "The existing profile failed a security check.",
   RECONCILIATION_BLOCKED: "Profile reconciliation was blocked.",
@@ -170,6 +173,7 @@ const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   PROPOSAL_BLOCKED: "Proposal capability was unavailable or invalid.",
   PROPOSAL_STALE: "The validated repository snapshot became stale.",
   PROPOSAL_FAILED: "The proposal could not be completed safely.",
+  PROPOSAL_TIMED_OUT: "A proposal operation exceeded its configured timeout.",
   REPORT_UNSAFE: "The report failed a safety check and was redacted.",
   RUN_FAILED: "The run could not be completed safely.",
 };
