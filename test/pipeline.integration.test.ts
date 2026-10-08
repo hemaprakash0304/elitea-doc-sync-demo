@@ -8,6 +8,7 @@ import type { GitHubReadClient, GitHubRepositoryMetadata, GitHubTreeEntry } from
 import { PROFILE_SECTIONS } from "../src/evidence/types.js";
 import { AUTOMATED_TEST_SUITE_VERSION, type AutomatedTestBinding, type AutomatedTestResult } from "../src/gate.js";
 import type { SecretScanInputFile, SecretScanOutcome, SecretScanner } from "../src/filter.js";
+import type { ProposalWriteCapability, ProposalWriteClient } from "../src/proposal.js";
 
 const CONFIGURATION: RunConfiguration = {
   targetRepository: "Sample/EliteA-Pipeline-Fixture",
@@ -23,8 +24,8 @@ function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
   return {
     status: "PASS",
     suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: 165,
-    passedTests: 165,
+    totalTests: 188,
+    passedTests: 188,
     failedTests: 0,
     skippedTests: 0,
     binding,
@@ -63,6 +64,43 @@ class SyntheticScanner implements SecretScanner {
       : []);
     return { status: "complete", scannedFileCount: files.length, findings };
   }
+}
+
+function syntheticProposalClient(): ProposalWriteClient {
+  const capability: ProposalWriteCapability = {
+    provider: "dedicated_github_proposal_app",
+    normalizedRepositoryId: CONFIGURATION.normalizedRepositoryId,
+    repositoryId: 42,
+    permissions: {
+      contents: "write",
+      pullRequests: "write",
+      canApprove: false,
+      canMerge: false,
+      canBypassBranchProtection: false,
+      canWriteDefaultBranch: false,
+    },
+    branchProtection: { pullRequestRequired: true, humanApprovalRequired: true, proposalAppBypass: false },
+  };
+  return {
+    capability,
+    createFeatureBranch: async (input) => ({ status: "CREATED", branchName: input.branchName, baseCommitSha: input.baseCommitSha }),
+    commitSingleProfileFile: async (input) => ({
+      commitSha: "c".repeat(40),
+      parentCommitSha: input.baseCommitSha,
+      treeSha: "d".repeat(40),
+      changedPaths: [input.path],
+      profileSha256: sha256(input.content),
+    }),
+    getBranchHead: async (input) => ({ branchName: input.branchName, commitSha: "c".repeat(40) }),
+    createPullRequest: async (input) => ({
+      number: 1,
+      url: "https://github.com/Sample/EliteA-Pipeline-Fixture/pull/1",
+      state: "open",
+      headBranch: input.headBranch,
+      baseBranch: input.baseBranch,
+    }),
+    closePullRequest: async () => true,
+  };
 }
 
 function snapshotFixture(
@@ -145,13 +183,14 @@ async function runSnapshot(
     secretScanner: fixture.scanner,
     automatedTests: (binding: AutomatedTestBinding) => passingTestResult(binding),
     automatedTestTimeoutMs: 100,
+    proposalWriteClient: syntheticProposalClient(),
   });
   return { fixture, result };
 }
 
 function requireSuccess(result: CoordinatorResult): Extract<CoordinatorResult, { ok: true }> {
   if (!result.ok) {
-    assert.fail(`Pipeline failed: ${result.error.code}; gate=${result.gate?.blockingFailures.map((failure) => failure.code).join(",") ?? "not-run"}`);
+    assert.fail(`Pipeline failed: ${result.error.code}; proposal=${result.proposal?.failureCode ?? "none"}; gate=${result.gate?.blockingFailures.map((failure) => failure.code).join(",") ?? "not-run"}`);
   }
   return result;
 }
@@ -181,6 +220,10 @@ function gitBlobSha(bytes: Buffer): string {
   return createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes])).digest("hex");
 }
 
+function sha256(value: string): string {
+  return createHash("sha256").update(value.replace(/\r\n/g, "\n"), "utf8").digest("hex");
+}
+
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -201,7 +244,7 @@ test("runs first generation through validation and repeats deterministically wit
   const first = await runSnapshot(sourceFiles);
   const result = requireSuccess(first.result);
 
-  assert.equal(result.context.stage, "GATE_CHECKED");
+  assert.equal(result.context.stage, "PROPOSED");
   assert.equal(result.context.defaultBranch, DEFAULT_BRANCH);
   assert.equal(result.context.snapshotCommitSha, FIRST_COMMIT);
   assert.equal(result.filtered.existingProfile.status, "absent");
@@ -217,9 +260,10 @@ test("runs first generation through validation and repeats deterministically wit
   assert.equal(result.validation.status, "PASS");
   assert.equal(result.gate.status, "PASS");
   assert.equal(result.proposalAuthorization.status, "AUTHORIZED");
+  assert.equal(result.proposal.status, "CREATED");
   assert.equal(result.reconciliation.candidate, result.composition.candidate);
-  assert.equal(first.fixture.calls.metadata, 1);
-  assert.deepEqual(first.fixture.calls.branches, [DEFAULT_BRANCH]);
+  assert.equal(first.fixture.calls.metadata, 4);
+  assert.deepEqual(first.fixture.calls.branches, Array(4).fill(DEFAULT_BRANCH));
   assert.deepEqual(first.fixture.calls.blobs, Object.keys(sourceFiles).sort(compareText));
   assert.deepEqual([...first.fixture.files], [...first.fixture.originalFiles]);
   assert.equal(first.fixture.files.has(TECHNICAL_PROFILE_PATH), false);
@@ -239,6 +283,7 @@ test("returns NO_CHANGES for an identical generated profile and preserves manual
   const result = requireSuccess(run.result);
 
   assert.equal(result.reconciliation.status, "NO_CHANGES");
+  assert.equal(result.proposal.status, "NO_CHANGES");
   assert.equal(result.reconciliation.candidate, existingProfile);
   assert.equal(result.reconciliation.candidateSha256?.length, 64);
   assert.deepEqual(result.reconciliation.additions, []);

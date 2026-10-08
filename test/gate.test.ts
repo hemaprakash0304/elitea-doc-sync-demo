@@ -35,8 +35,8 @@ const RUN_ID = "run-00000000-0000-4000-8000-000000000013";
 const TESTS: AutomatedTestResult = {
   status: "PASS",
   suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-  totalTests: 165,
-  passedTests: 165,
+  totalTests: 188,
+  passedTests: 188,
   failedTests: 0,
   skippedTests: 0,
 };
