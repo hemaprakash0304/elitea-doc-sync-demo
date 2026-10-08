@@ -6,6 +6,7 @@ import test from "node:test";
 import type { RunConfiguration } from "../src/config.js";
 import { coordinateRun } from "../src/coordinator.js";
 import { GitHubReadError } from "../src/github-errors.js";
+import { AUTOMATED_TEST_SUITE_VERSION, type AutomatedTestBinding, type AutomatedTestResult } from "../src/gate.js";
 import type { SecretScanner } from "../src/filter.js";
 
 const FIXED_UUID = "00000000-0000-4000-8000-000000000001";
@@ -29,6 +30,17 @@ const FAKE_SNAPSHOT = {
   treeSha: "b".repeat(40),
   readRetryCount: 0,
 };
+function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
+  return {
+    status: "PASS",
+    suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
+    totalTests: 165,
+    passedTests: 165,
+    failedTests: 0,
+    skippedTests: 0,
+    binding,
+  };
+}
 
 function fakeDependencies() {
   return {
@@ -48,8 +60,11 @@ function fakeDependencies() {
     secretScanner: {
       id: "test_double",
       executionBoundary: "local",
+      version: "test-double/1",
       scan: async (files) => ({ status: "complete", scannedFileCount: files.length, findings: [] }),
     } satisfies SecretScanner,
+    automatedTests: (binding: AutomatedTestBinding) => passingTestResult(binding),
+    automatedTestTimeoutMs: 100,
   };
 }
 
@@ -92,7 +107,7 @@ test("moves through collection and filtering using one immutable snapshot", asyn
     return;
   }
 
-  assert.equal(result.context.stage, "VALIDATED");
+  assert.equal(result.context.stage, "GATE_CHECKED");
   assert.equal(result.context.status, "ready");
   assert.equal(result.context.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.equal(result.filtered.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
@@ -110,6 +125,11 @@ test("moves through collection and filtering using one immutable snapshot", asyn
   assert.match(result.composition.candidate, /^# Technical Profile\n/);
   assert.equal(result.reconciliation.status, "FIRST_GENERATION");
   assert.equal(result.validation.status, "PASS");
+  assert.equal(result.gate.status, "PASS");
+  assert.equal(result.proposalAuthorization.status, "AUTHORIZED");
+  assert.equal(result.proposalAuthorization.binding.targetRepository, VALID_CONFIGURATION.normalizedRepositoryId);
+  assert.equal(result.proposalAuthorization.binding.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
+  assert.equal(result.proposalAuthorization.binding.candidateSha256, result.reconciliation.candidateSha256);
   assert.ok(result.validation.checks.length > 0);
   assert.equal(result.reconciliation.candidate, result.composition.candidate);
   assert.equal(result.reconciliation.candidateSha256, result.composition.candidateSha256);
@@ -118,10 +138,12 @@ test("moves through collection and filtering using one immutable snapshot", asyn
   assert.equal(result.diagnostic.defaultBranch, "trunk");
   assert.equal(result.diagnostic.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.equal(result.diagnostic.profilePresent, false);
-  assert.equal(result.diagnostic.event, "validation_completed");
-  assert.equal(result.diagnostic.fromStage, "RECONCILED");
-  assert.equal(result.diagnostic.toStage, "VALIDATED");
+  assert.equal(result.diagnostic.event, "gate_completed");
+  assert.equal(result.diagnostic.fromStage, "VALIDATED");
+  assert.equal(result.diagnostic.toStage, "GATE_CHECKED");
   assert.equal(result.diagnostic.validationStatus, "PASS");
+  assert.equal(result.diagnostic.gateStatus, "PASS");
+  assert.equal(result.diagnostic.automatedTestStatus, "PASS");
   assert.equal(result.diagnostic.coverageEntryCount, 16);
 });
 
@@ -134,6 +156,7 @@ test("returns observations from sanitized snapshot files through coordinator int
     secretScanner: {
       id: "test_double",
       executionBoundary: "local",
+      version: "test-double/1",
       scan: async (files) => ({ status: "complete", scannedFileCount: files.length, findings: [] }),
     },
     githubClient: {
@@ -158,7 +181,7 @@ test("returns observations from sanitized snapshot files through coordinator int
   if (!result.ok) {
     return;
   }
-  assert.equal(result.context.stage, "VALIDATED");
+  assert.equal(result.context.stage, "GATE_CHECKED");
   assert.equal(result.analysis.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.ok(result.analysis.observations.some((observation) =>
     observation.category === "package_name" && observation.value === "coordinator-fixture"));
@@ -168,6 +191,7 @@ test("returns observations from sanitized snapshot files through coordinator int
     item.profileField === "Application Name" && item.fact.value === "coordinator-fixture"));
   assert.ok(result.composition.candidate.includes("coordinator-fixture"));
   assert.equal(result.reconciliation.status, "FIRST_GENERATION");
+  assert.equal(result.gate.status, "PASS");
 });
 
 test("blocks when the default local scanner is unavailable", async () => {
@@ -192,6 +216,7 @@ test("keeps synthetic secret values out of coordinator results and diagnostics",
   const scanner: SecretScanner = {
     id: "test_double",
     executionBoundary: "local",
+    version: "test-double/1",
     scan: async (files) => ({
       status: "complete",
       scannedFileCount: files.length,
@@ -311,4 +336,52 @@ test("CLI rejects branch overrides before contacting GitHub", () => {
 
   assert.equal(result.status, 2);
   assert.match(result.stderr, /Branch overrides/);
+});
+
+test("blocks gate progression when the automated test result is missing or failed", async (t) => {
+  await t.test("missing test result", async () => {
+    const { automatedTests: _tests, ...dependencies } = fakeDependencies();
+    const result = await coordinateRun(VALID_CONFIGURATION, dependencies);
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.code, "GATE_BLOCKED");
+    assert.equal(result.context?.stage, "GATE_CHECKED");
+    assert.equal(result.gate?.status, "BLOCKED");
+    assert.ok(result.gate?.blockingFailures.some((failure) => failure.code === "AUTOMATED_TESTS_UNAVAILABLE"));
+    assert.equal("proposalAuthorization" in result, false);
+  });
+
+  await t.test("failed test result", async () => {
+    const result = await coordinateRun(VALID_CONFIGURATION, {
+      ...fakeDependencies(),
+      automatedTests: (binding: AutomatedTestBinding) => ({
+        ...passingTestResult(binding),
+        status: "FAIL",
+        failedTests: 1,
+        passedTests: 126,
+      }),
+    });
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.code, "GATE_BLOCKED");
+    assert.equal(result.gate?.status, "BLOCKED");
+    assert.ok(result.gate?.blockingFailures.some((failure) => failure.code === "AUTOMATED_TESTS_FAILED"));
+    assert.equal("proposalAuthorization" in result, false);
+  });
+
+  await t.test("timed-out test result", async () => {
+    const result = await coordinateRun(VALID_CONFIGURATION, {
+      ...fakeDependencies(),
+      automatedTests: async () => new Promise<AutomatedTestResult>(() => undefined),
+      automatedTestTimeoutMs: 5,
+    });
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.code, "GATE_BLOCKED");
+    assert.ok(result.gate?.blockingFailures.some((failure) => failure.code === "AUTOMATED_TESTS_TIMED_OUT"));
+    assert.equal("proposalAuthorization" in result, false);
+  });
 });

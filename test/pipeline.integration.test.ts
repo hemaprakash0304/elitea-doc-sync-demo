@@ -6,6 +6,7 @@ import { TECHNICAL_PROFILE_PATH } from "../src/collection.js";
 import { coordinateRun, type CoordinatorResult } from "../src/coordinator.js";
 import type { GitHubReadClient, GitHubRepositoryMetadata, GitHubTreeEntry } from "../src/github-client.js";
 import { PROFILE_SECTIONS } from "../src/evidence/types.js";
+import { AUTOMATED_TEST_SUITE_VERSION, type AutomatedTestBinding, type AutomatedTestResult } from "../src/gate.js";
 import type { SecretScanInputFile, SecretScanOutcome, SecretScanner } from "../src/filter.js";
 
 const CONFIGURATION: RunConfiguration = {
@@ -18,6 +19,17 @@ const FIRST_COMMIT = "a".repeat(40);
 const SECOND_COMMIT = "d".repeat(40);
 const FIXED_RUN_ID = "00000000-0000-4000-8000-000000000012";
 const FIXED_TIME = new Date("2026-10-08T12:00:00.000Z");
+function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
+  return {
+    status: "PASS",
+    suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
+    totalTests: 165,
+    passedTests: 165,
+    failedTests: 0,
+    skippedTests: 0,
+    binding,
+  };
+}
 
 interface SnapshotCalls {
   metadata: number;
@@ -37,6 +49,7 @@ interface SnapshotFixture {
 class SyntheticScanner implements SecretScanner {
   readonly id = "test_double" as const;
   readonly executionBoundary = "local" as const;
+  readonly version = "test-double/1";
   readonly scannedPaths: string[][] = [];
   failOnCall?: number;
 
@@ -130,13 +143,15 @@ async function runSnapshot(
     now: () => FIXED_TIME,
     githubClient: fixture.client,
     secretScanner: fixture.scanner,
+    automatedTests: (binding: AutomatedTestBinding) => passingTestResult(binding),
+    automatedTestTimeoutMs: 100,
   });
   return { fixture, result };
 }
 
 function requireSuccess(result: CoordinatorResult): Extract<CoordinatorResult, { ok: true }> {
   if (!result.ok) {
-    assert.fail(`Pipeline failed: ${result.error.code}; validation=${result.validation?.blockingFailures.map((issue) => issue.code).join(",") ?? "not-run"}`);
+    assert.fail(`Pipeline failed: ${result.error.code}; gate=${result.gate?.blockingFailures.map((failure) => failure.code).join(",") ?? "not-run"}`);
   }
   return result;
 }
@@ -186,7 +201,7 @@ test("runs first generation through validation and repeats deterministically wit
   const first = await runSnapshot(sourceFiles);
   const result = requireSuccess(first.result);
 
-  assert.equal(result.context.stage, "VALIDATED");
+  assert.equal(result.context.stage, "GATE_CHECKED");
   assert.equal(result.context.defaultBranch, DEFAULT_BRANCH);
   assert.equal(result.context.snapshotCommitSha, FIRST_COMMIT);
   assert.equal(result.filtered.existingProfile.status, "absent");
@@ -200,6 +215,8 @@ test("runs first generation through validation and repeats deterministically wit
   assert.match(profileSection(result.composition.candidate, "05"), new RegExp(dependency.evidenceId));
   assert.equal(result.reconciliation.status, "FIRST_GENERATION");
   assert.equal(result.validation.status, "PASS");
+  assert.equal(result.gate.status, "PASS");
+  assert.equal(result.proposalAuthorization.status, "AUTHORIZED");
   assert.equal(result.reconciliation.candidate, result.composition.candidate);
   assert.equal(first.fixture.calls.metadata, 1);
   assert.deepEqual(first.fixture.calls.branches, [DEFAULT_BRANCH]);
@@ -230,6 +247,7 @@ test("returns NO_CHANGES for an identical generated profile and preserves manual
   assert.equal(result.reconciliation.preservedManualContent, true);
   assert.ok(result.reconciliation.candidate?.includes("### Human-maintained notes\nKeep this approved note byte-for-byte.\n"));
   assert.equal(result.validation.status, "PASS");
+  assert.equal(result.gate.status, "PASS");
   assert.equal(run.fixture.files.get(TECHNICAL_PROFILE_PATH), existingProfile);
   assert.deepEqual([...run.fixture.files], [...run.fixture.originalFiles]);
 });
@@ -250,6 +268,7 @@ test("adds newly supported evidence to the corresponding generated profile field
   assert.ok(addition.evidenceIds.includes(newDependency.evidenceId));
   assert.match(profileSection(result.reconciliation.candidate ?? "", "05"), new RegExp(newDependency.evidenceId));
   assert.equal(result.validation.status, "PASS");
+  assert.equal(result.gate.status, "PASS");
   assert.deepEqual([...run.fixture.files], [...run.fixture.originalFiles]);
 });
 
@@ -276,6 +295,7 @@ test("updates changed evidence and removes obsolete generated evidence without r
   assert.match(dependencySection, /\^2\.0\.0/);
   assert.doesNotMatch(dependencySection, /\^1\.0\.0|obsolete|~2\.0\.0/);
   assert.equal(result.validation.status, "PASS");
+  assert.equal(result.gate.status, "PASS");
   assert.deepEqual([...run.fixture.files], [...run.fixture.originalFiles]);
 });
 
@@ -286,6 +306,7 @@ test("surfaces conflicting manifest and repository-name evidence with traceable 
   const competingEvidence = result.evidenceCatalog.evidence.filter((item) => item.profileField === "Application Name");
 
   assert.equal(result.validation.status, "PASS");
+  assert.equal(result.gate.status, "PASS");
   assert.match(nameRow, /\| Application Name \| Conflicting evidence; see Evidence \/ Verification Status \| Conflict \|/);
   assert.ok(competingEvidence.length >= 2);
   for (const item of competingEvidence) {
@@ -306,7 +327,7 @@ test("preserves approved profile bytes and emits no candidate when scanning or r
 
     assert.equal(run.result.ok, false);
     if (run.result.ok) return;
-    assert.equal(run.result.error.code, "VALIDATION_BLOCKED");
+    assert.equal(run.result.error.code, "GATE_BLOCKED");
     assert.equal(run.result.validation?.status, "BLOCKED");
     assert.equal("candidate" in run.result, false);
     assert.equal(run.fixture.files.get(TECHNICAL_PROFILE_PATH), originalProfile);

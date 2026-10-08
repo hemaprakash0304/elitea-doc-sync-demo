@@ -6,7 +6,7 @@ import {
 } from "./config.js";
 import { createGitHubReadClient, type GitHubReadClient, type GitHubRepositoryMetadata } from "./github-client.js";
 import { GitHubReadError, type GitHubReadErrorCode } from "./github-errors.js";
-import { collectRepositorySnapshot, RepositoryCollectionError, type CollectionErrorCode } from "./collection.js";
+import { collectRepositorySnapshot, RepositoryCollectionError, TECHNICAL_PROFILE_PATH, type CollectionErrorCode } from "./collection.js";
 import {
   filterRepositorySnapshot,
   UnavailableSecretScanner,
@@ -24,8 +24,16 @@ import {
   type ReconciliationStatus,
 } from "./reconciler.js";
 import { validateReconciledCandidate, type ValidationResult, type ValidationStatus } from "./validation.js";
+import {
+  createAutomatedTestBinding,
+  evaluateMandatoryGate,
+  type AutomatedTestBinding,
+  type AutomatedTestResult,
+  type MandatoryGateResult,
+  type ProposalAuthorization,
+} from "./gate.js";
 
-export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED" | "RECONCILED" | "VALIDATED";
+export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED" | "RECONCILED" | "VALIDATED" | "GATE_CHECKED";
 export type RunStatus = "configured" | "ready" | "partial" | "failed";
 
 export interface RunContext {
@@ -41,9 +49,9 @@ export interface RunContext {
   status: RunStatus;
 }
 
-export interface ValidationCompletedDiagnostic {
+export interface GateCompletedDiagnostic {
   level: "info" | "error";
-  event: "validation_completed" | "validation_blocked";
+  event: "gate_completed";
   runId: string;
   normalizedRepositoryId: string;
   repositoryId: number;
@@ -78,12 +86,16 @@ export interface ValidationCompletedDiagnostic {
   validationCheckCount: number;
   blockingFailureCount: number;
   warningCount: number;
-  fromStage: "RECONCILED";
-  toStage: "VALIDATED";
+  gateStatus: "PASS";
+  gateCheckCount: number;
+  gateFailureCount: number;
+  automatedTestStatus: AutomatedTestResult["status"];
+  fromStage: "VALIDATED";
+  toStage: "GATE_CHECKED";
   status: RunStatus;
 }
 
-export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | "RECONCILIATION_BLOCKED" | "RECONCILIATION_FAILED" | "VALIDATION_BLOCKED" | "VALIDATION_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
+export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | "RECONCILIATION_BLOCKED" | "RECONCILIATION_FAILED" | "VALIDATION_BLOCKED" | "VALIDATION_FAILED" | "GATE_BLOCKED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
 
 export interface CoordinatorError {
   code: CoordinatorErrorCode;
@@ -93,7 +105,7 @@ export interface CoordinatorError {
 
 export interface CoordinatorFailureDiagnostic {
   level: "error";
-  event: "run_initialization_failed" | "filter_blocked" | "reconciliation_blocked" | "validation_blocked";
+  event: "run_initialization_failed" | "filter_blocked" | "reconciliation_blocked" | "gate_blocked";
   code: CoordinatorErrorCode;
   message: string;
   retryCount: number;
@@ -102,8 +114,8 @@ export interface CoordinatorFailureDiagnostic {
 }
 
 export type CoordinatorResult =
-  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; reconciliation: ProfileReconciliationResult; validation: ValidationResult; diagnostic: ValidationCompletedDiagnostic }
-  | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult; reconciliation?: ProfileReconciliationResult; validation?: ValidationResult };
+  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; reconciliation: ProfileReconciliationResult; validation: ValidationResult; gate: MandatoryGateResult; proposalAuthorization: ProposalAuthorization; diagnostic: GateCompletedDiagnostic }
+  | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult; reconciliation?: ProfileReconciliationResult; validation?: ValidationResult; gate?: MandatoryGateResult };
 
 export interface CoordinatorDependencies {
   createRunId?: () => string;
@@ -111,6 +123,8 @@ export interface CoordinatorDependencies {
   githubClient?: GitHubReadClient;
   createGitHubClient?: (executionContext: ExecutionContext) => GitHubReadClient;
   secretScanner?: SecretScanner;
+  automatedTests?: AutomatedTestResult | ((binding: AutomatedTestBinding, signal: AbortSignal) => AutomatedTestResult | Promise<AutomatedTestResult>);
+  automatedTestTimeoutMs?: number;
 }
 
 const ALLOWED_CONFIGURATION_KEYS = new Set([
@@ -217,34 +231,52 @@ export async function coordinateRun(
       reconciliation,
       scanner: dependencies.secretScanner ?? new UnavailableSecretScanner(),
     });
-    if (validation.status !== "PASS") {
-      const blocked = validation.status === "BLOCKED";
-      const code = blocked ? "VALIDATION_BLOCKED" : "VALIDATION_FAILED";
-      const message = blocked
-        ? "Required security or integrity validation was blocked; the approved profile was preserved."
-        : "The reconciled profile candidate did not pass required validation; the approved profile was preserved.";
+    const testBinding = createAutomatedTestBinding({
+      runId,
+      configuration,
+      filtered,
+      composition,
+      reconciliation,
+    });
+    const automatedTests = await resolveAutomatedTests(dependencies, testBinding);
+    const gate = evaluateMandatoryGate({
+      runId,
+      configuration,
+      repository,
+      filtered,
+      catalog: evidenceCatalog,
+      composition,
+      reconciliation,
+      validation,
+      ...(automatedTests === undefined ? {} : { automatedTests }),
+      ...(dependencies.secretScanner?.version === undefined ? {} : { scannerVersion: dependencies.secretScanner.version }),
+      changedFilePaths: reconciliation.status === "NO_CHANGES" ? [] : [TECHNICAL_PROFILE_PATH],
+    });
+    if (gate.status !== "PASS" || gate.proposalAuthorization === undefined) {
+      const message = "Mandatory validation, security, and automated-test checks did not all pass; no proposal capability was authorized.";
       return {
         ok: false,
-        error: { code, message, retryCount: 0 },
+        error: { code: "GATE_BLOCKED", message, retryCount: 0 },
         diagnostic: {
           level: "error",
-          event: "validation_blocked",
-          code,
+          event: "gate_blocked",
+          code: "GATE_BLOCKED",
           message,
           retryCount: 0,
           runId,
           normalizedRepositoryId: configuration.normalizedRepositoryId,
         },
-        context: { ...context, stage: "VALIDATED", status: "failed" },
+        context: { ...context, stage: "GATE_CHECKED", status: "failed" },
         filtered,
         validation,
+        gate,
       };
     }
     const hasPartialEvidence = collection.status === "partial" || filtered.status === "partial" ||
       analysis.issues.length > 0 || evidenceCatalog.issues.length > 0;
     const evidencedContext: RunContext = {
       ...context,
-      stage: "VALIDATED",
+      stage: "GATE_CHECKED",
       status: hasPartialEvidence ? "partial" : context.status,
     };
 
@@ -258,9 +290,11 @@ export async function coordinateRun(
       composition,
       reconciliation,
       validation,
+      gate,
+      proposalAuthorization: gate.proposalAuthorization,
       diagnostic: {
         level: "info",
-        event: "validation_completed",
+        event: "gate_completed",
         runId,
         normalizedRepositoryId: repository.normalizedRepositoryId,
         repositoryId: repository.repositoryId,
@@ -294,9 +328,13 @@ export async function coordinateRun(
         validationCheckCount: validation.checks.length,
         blockingFailureCount: validation.blockingFailures.length,
         warningCount: validation.warnings.length,
+        gateStatus: gate.status,
+        gateCheckCount: gate.checks.length,
+        gateFailureCount: gate.blockingFailures.length,
+        automatedTestStatus: gate.automatedTestResult.status === "MISSING" ? "UNAVAILABLE" : gate.automatedTestResult.status,
         executionContext: evidencedContext.executionContext,
-        fromStage: "RECONCILED",
-        toStage: "VALIDATED",
+        fromStage: "VALIDATED",
+        toStage: "GATE_CHECKED",
         status: evidencedContext.status,
       },
     };
@@ -319,6 +357,43 @@ export async function coordinateRun(
       ? readyContext
       : configuredContext;
     return { ...failure, context: { ...context, status: "failed" } };
+  }
+}
+
+const AUTOMATED_TEST_TIMEOUT = Symbol("automated-test-timeout");
+
+async function resolveAutomatedTests(
+  dependencies: CoordinatorDependencies,
+  binding: AutomatedTestBinding,
+): Promise<AutomatedTestResult | undefined> {
+  const result = dependencies.automatedTests;
+  if (result === undefined || typeof result !== "function") {
+    return result;
+  }
+  const timeoutMs = dependencies.automatedTestTimeoutMs;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs === undefined || timeoutMs < 1) {
+    return { status: "INDETERMINATE", binding };
+  }
+
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<AutomatedTestResult>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(AUTOMATED_TEST_TIMEOUT);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => result(binding, controller.signal)),
+      timeout,
+    ]);
+  } catch (error) {
+    return { status: error === AUTOMATED_TEST_TIMEOUT ? "TIMEOUT" : "INDETERMINATE", binding };
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
   }
 }
 
