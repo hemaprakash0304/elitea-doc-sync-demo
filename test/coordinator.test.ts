@@ -35,8 +35,8 @@ function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
   return {
     status: "PASS",
     suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: 188,
-    passedTests: 188,
+    totalTests: 195,
+    passedTests: 195,
     failedTests: 0,
     skippedTests: 0,
     binding,
@@ -191,6 +191,21 @@ test("moves through collection and filtering using one immutable snapshot", asyn
   assert.equal(result.diagnostic.proposalStatus, "CREATED");
   assert.equal(result.diagnostic.pullRequestNumber, 1);
   assert.equal(result.diagnostic.coverageEntryCount, 16);
+  assert.equal(result.report.outcome, "PROPOSED");
+  assert.equal(result.report.runId, result.context.runId);
+  assert.equal(result.report.targetRepository, VALID_CONFIGURATION.normalizedRepositoryId);
+  assert.equal(result.report.githubRepositoryId, FAKE_REPOSITORY.repositoryId);
+  assert.equal(result.report.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
+  assert.equal(result.report.candidateSha256, result.reconciliation.candidateSha256);
+  assert.deepEqual(result.report.stages.map((stage) => stage.id), [
+    "COLLECTION", "FILTERING", "ANALYSIS", "EVIDENCE", "COMPOSITION",
+    "RECONCILIATION", "VALIDATION", "GATE", "PROPOSAL",
+  ]);
+  assert.ok(result.report.stages.every((stage) => stage.status === "PASS"));
+  assert.equal(result.report.counts.profileFields, 16);
+  assert.equal(result.report.proposal?.pullRequestNumber, 1);
+  assert.deepEqual(result.report.proposal?.changedFilePaths, ["technical-profile.md"]);
+  assert.doesNotMatch(JSON.stringify(result.report), /candidate contents|package\.json|source text/i);
 });
 
 test("returns observations from sanitized snapshot files through coordinator integration", async () => {
@@ -253,6 +268,8 @@ test("blocks when the default local scanner is unavailable", async () => {
   assert.equal(result.context?.stage, "FILTERED");
   assert.equal(result.context?.status, "failed");
   assert.equal(result.diagnostic.event, "filter_blocked");
+  assert.equal(result.report.outcome, "BLOCKED");
+  assert.ok(result.report.errors.some((error) => error.code === "SCANNER_UNAVAILABLE" && error.stage === "FILTERING"));
 });
 
 test("keeps synthetic secret values out of coordinator results and diagnostics", async () => {
@@ -342,6 +359,8 @@ test("returns a typed sanitized failure when GitHub metadata access fails", asyn
     assert.equal(result.error.code, "AUTHENTICATION_FAILED");
     assert.equal(result.context?.stage, "READY_FOR_COLLECTION");
     assert.equal(result.context?.status, "failed");
+    assert.equal(result.report.outcome, "FAILED");
+    assert.equal(result.report.errors[0]?.message.includes("SYNTHETIC"), false);
   }
 });
 
@@ -395,6 +414,8 @@ test("blocks gate progression when the automated test result is missing or faile
     assert.equal(result.context?.stage, "GATE_CHECKED");
     assert.equal(result.gate?.status, "BLOCKED");
     assert.ok(result.gate?.blockingFailures.some((failure) => failure.code === "AUTOMATED_TESTS_UNAVAILABLE"));
+    assert.equal(result.report.outcome, "BLOCKED");
+    assert.ok(result.report.errors.some((error) => error.code === "AUTOMATED_TESTS_UNAVAILABLE"));
     assert.equal("proposalAuthorization" in result, false);
   });
 
@@ -443,5 +464,9 @@ test("blocks proposal creation when the dedicated proposal App adapter is unavai
   assert.equal(result.gate?.status, "PASS");
   assert.equal(result.proposal?.status, "BLOCKED");
   assert.equal(result.proposal?.failureCode, "PROPOSAL_CAPABILITY_UNAVAILABLE");
+  assert.equal(result.report.outcome, "FAILED");
+  assert.equal(result.report.proposal?.status, "BLOCKED");
+  assert.equal(result.report.proposal?.pullRequestNumber, undefined);
+  assert.ok(result.report.errors.some((error) => error.code === "PROPOSAL_BLOCKED" && error.stage === "PROPOSAL"));
   assert.equal("proposalAuthorization" in result, false);
 });

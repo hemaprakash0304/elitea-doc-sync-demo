@@ -24,8 +24,8 @@ function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
   return {
     status: "PASS",
     suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: 188,
-    passedTests: 188,
+    totalTests: 195,
+    passedTests: 195,
     failedTests: 0,
     skippedTests: 0,
     binding,
@@ -284,6 +284,10 @@ test("returns NO_CHANGES for an identical generated profile and preserves manual
 
   assert.equal(result.reconciliation.status, "NO_CHANGES");
   assert.equal(result.proposal.status, "NO_CHANGES");
+  assert.equal(result.report.outcome, "NO_CHANGES");
+  assert.equal(result.report.proposal?.status, "NO_CHANGES");
+  assert.equal(result.report.proposal?.pullRequestNumber, undefined);
+  assert.equal(result.report.counts.proposalChangedFiles, 0);
   assert.equal(result.reconciliation.candidate, existingProfile);
   assert.equal(result.reconciliation.candidateSha256?.length, 64);
   assert.deepEqual(result.reconciliation.additions, []);

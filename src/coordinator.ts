@@ -37,6 +37,7 @@ import {
   type ProposalResult,
   type ProposalWriteClient,
 } from "./proposal.js";
+import { createSanitizedRunReport, type SanitizedRunReport } from "./report.js";
 
 export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED" | "RECONCILED" | "VALIDATED" | "GATE_CHECKED" | "PROPOSED";
 export type RunStatus = "configured" | "ready" | "partial" | "failed";
@@ -123,9 +124,11 @@ export interface CoordinatorFailureDiagnostic {
   normalizedRepositoryId?: string;
 }
 
-export type CoordinatorResult =
+export type CoordinatorExecutionResult =
   | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; reconciliation: ProfileReconciliationResult; validation: ValidationResult; gate: MandatoryGateResult; proposalAuthorization: ProposalAuthorization; proposal: ProposalResult; diagnostic: ProposalCompletedDiagnostic }
   | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult; reconciliation?: ProfileReconciliationResult; validation?: ValidationResult; gate?: MandatoryGateResult; proposal?: ProposalResult };
+
+export type CoordinatorResult = CoordinatorExecutionResult & { report: SanitizedRunReport };
 
 export interface CoordinatorDependencies {
   createRunId?: () => string;
@@ -152,6 +155,17 @@ export async function coordinateRun(
   configuration: unknown,
   dependencies: CoordinatorDependencies = {},
 ): Promise<CoordinatorResult> {
+  const result = await executeCoordinatorRun(configuration, dependencies);
+  return {
+    ...result,
+    report: createSanitizedRunReport(result, completionTimestamp(dependencies)),
+  };
+}
+
+async function executeCoordinatorRun(
+  configuration: unknown,
+  dependencies: CoordinatorDependencies,
+): Promise<CoordinatorExecutionResult> {
   if (!isRunConfiguration(configuration)) {
     return createFailure("INVALID_CONFIGURATION", INVALID_CONFIGURATION_MESSAGE);
   }
@@ -417,6 +431,15 @@ export async function coordinateRun(
   }
 }
 
+function completionTimestamp(dependencies: CoordinatorDependencies): string | undefined {
+  try {
+    const value = (dependencies.now ?? (() => new Date()))();
+    return value instanceof Date && Number.isFinite(value.getTime()) ? value.toISOString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const AUTOMATED_TEST_TIMEOUT = Symbol("automated-test-timeout");
 
 async function resolveAutomatedTests(
@@ -531,7 +554,7 @@ function createFailure(
   retryCount = 0,
   runId?: string,
   normalizedRepositoryId?: string,
-): CoordinatorResult {
+): CoordinatorExecutionResult {
   return {
     ok: false,
     error: { code, message, retryCount },
