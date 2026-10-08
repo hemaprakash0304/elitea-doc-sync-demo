@@ -23,8 +23,9 @@ import {
   type ProfileReconciliationResult,
   type ReconciliationStatus,
 } from "./reconciler.js";
+import { validateReconciledCandidate, type ValidationResult, type ValidationStatus } from "./validation.js";
 
-export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED" | "RECONCILED";
+export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED" | "RECONCILED" | "VALIDATED";
 export type RunStatus = "configured" | "ready" | "partial" | "failed";
 
 export interface RunContext {
@@ -40,9 +41,9 @@ export interface RunContext {
   status: RunStatus;
 }
 
-export interface ReconciliationCompletedDiagnostic {
+export interface ValidationCompletedDiagnostic {
   level: "info" | "error";
-  event: "reconciliation_completed" | "reconciliation_blocked";
+  event: "validation_completed" | "validation_blocked";
   runId: string;
   normalizedRepositoryId: string;
   repositoryId: number;
@@ -73,12 +74,16 @@ export interface ReconciliationCompletedDiagnostic {
   removalCount: number;
   conflictCount: number;
   preservedManualContent: boolean;
-  fromStage: "COMPOSED";
-  toStage: "RECONCILED";
+  validationStatus: ValidationStatus;
+  validationCheckCount: number;
+  blockingFailureCount: number;
+  warningCount: number;
+  fromStage: "RECONCILED";
+  toStage: "VALIDATED";
   status: RunStatus;
 }
 
-export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | "RECONCILIATION_BLOCKED" | "RECONCILIATION_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
+export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | "RECONCILIATION_BLOCKED" | "RECONCILIATION_FAILED" | "VALIDATION_BLOCKED" | "VALIDATION_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
 
 export interface CoordinatorError {
   code: CoordinatorErrorCode;
@@ -88,7 +93,7 @@ export interface CoordinatorError {
 
 export interface CoordinatorFailureDiagnostic {
   level: "error";
-  event: "run_initialization_failed" | "filter_blocked" | "reconciliation_blocked";
+  event: "run_initialization_failed" | "filter_blocked" | "reconciliation_blocked" | "validation_blocked";
   code: CoordinatorErrorCode;
   message: string;
   retryCount: number;
@@ -97,8 +102,8 @@ export interface CoordinatorFailureDiagnostic {
 }
 
 export type CoordinatorResult =
-  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; reconciliation: ProfileReconciliationResult; diagnostic: ReconciliationCompletedDiagnostic }
-  | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult; reconciliation?: ProfileReconciliationResult };
+  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; reconciliation: ProfileReconciliationResult; validation: ValidationResult; diagnostic: ValidationCompletedDiagnostic }
+  | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult; reconciliation?: ProfileReconciliationResult; validation?: ValidationResult };
 
 export interface CoordinatorDependencies {
   createRunId?: () => string;
@@ -205,11 +210,41 @@ export async function coordinateRun(
         reconciliation,
       };
     }
+    const validation = await validateReconciledCandidate({
+      filtered,
+      catalog: evidenceCatalog,
+      composition,
+      reconciliation,
+      scanner: dependencies.secretScanner ?? new UnavailableSecretScanner(),
+    });
+    if (validation.status !== "PASS") {
+      const blocked = validation.status === "BLOCKED";
+      const code = blocked ? "VALIDATION_BLOCKED" : "VALIDATION_FAILED";
+      const message = blocked
+        ? "Required security or integrity validation was blocked; the approved profile was preserved."
+        : "The reconciled profile candidate did not pass required validation; the approved profile was preserved.";
+      return {
+        ok: false,
+        error: { code, message, retryCount: 0 },
+        diagnostic: {
+          level: "error",
+          event: "validation_blocked",
+          code,
+          message,
+          retryCount: 0,
+          runId,
+          normalizedRepositoryId: configuration.normalizedRepositoryId,
+        },
+        context: { ...context, stage: "VALIDATED", status: "failed" },
+        filtered,
+        validation,
+      };
+    }
     const hasPartialEvidence = collection.status === "partial" || filtered.status === "partial" ||
       analysis.issues.length > 0 || evidenceCatalog.issues.length > 0;
     const evidencedContext: RunContext = {
       ...context,
-      stage: "RECONCILED",
+      stage: "VALIDATED",
       status: hasPartialEvidence ? "partial" : context.status,
     };
 
@@ -222,9 +257,10 @@ export async function coordinateRun(
       evidenceCatalog,
       composition,
       reconciliation,
+      validation,
       diagnostic: {
         level: "info",
-        event: "reconciliation_completed",
+        event: "validation_completed",
         runId,
         normalizedRepositoryId: repository.normalizedRepositoryId,
         repositoryId: repository.repositoryId,
@@ -254,9 +290,13 @@ export async function coordinateRun(
         removalCount: reconciliation.removals.length,
         conflictCount: reconciliation.conflicts.length,
         preservedManualContent: reconciliation.preservedManualContent,
+        validationStatus: validation.status,
+        validationCheckCount: validation.checks.length,
+        blockingFailureCount: validation.blockingFailures.length,
+        warningCount: validation.warnings.length,
         executionContext: evidencedContext.executionContext,
-        fromStage: "COMPOSED",
-        toStage: "RECONCILED",
+        fromStage: "RECONCILED",
+        toStage: "VALIDATED",
         status: evidencedContext.status,
       },
     };
