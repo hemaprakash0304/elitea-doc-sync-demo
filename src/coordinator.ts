@@ -32,8 +32,13 @@ import {
   type MandatoryGateResult,
   type ProposalAuthorization,
 } from "./gate.js";
+import {
+  submitTechnicalProfileProposal,
+  type ProposalResult,
+  type ProposalWriteClient,
+} from "./proposal.js";
 
-export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED" | "RECONCILED" | "VALIDATED" | "GATE_CHECKED";
+export type RunStage = "CONFIGURED" | "READY_FOR_COLLECTION" | "COLLECTED" | "FILTERED" | "ANALYZED" | "EVIDENCED" | "COMPOSED" | "RECONCILED" | "VALIDATED" | "GATE_CHECKED" | "PROPOSED";
 export type RunStatus = "configured" | "ready" | "partial" | "failed";
 
 export interface RunContext {
@@ -49,9 +54,9 @@ export interface RunContext {
   status: RunStatus;
 }
 
-export interface GateCompletedDiagnostic {
+export interface ProposalCompletedDiagnostic {
   level: "info" | "error";
-  event: "gate_completed";
+  event: "proposal_created" | "proposal_no_changes";
   runId: string;
   normalizedRepositoryId: string;
   repositoryId: number;
@@ -90,12 +95,17 @@ export interface GateCompletedDiagnostic {
   gateCheckCount: number;
   gateFailureCount: number;
   automatedTestStatus: AutomatedTestResult["status"];
-  fromStage: "VALIDATED";
-  toStage: "GATE_CHECKED";
+  proposalStatus: "CREATED" | "NO_CHANGES";
+  changedFileCount: number;
+  branchName?: string;
+  pullRequestNumber?: number;
+  pullRequestUrl?: string;
+  fromStage: "GATE_CHECKED";
+  toStage: "PROPOSED";
   status: RunStatus;
 }
 
-export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | "RECONCILIATION_BLOCKED" | "RECONCILIATION_FAILED" | "VALIDATION_BLOCKED" | "VALIDATION_FAILED" | "GATE_BLOCKED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
+export type CoordinatorErrorCode = "INVALID_CONFIGURATION" | "RUN_INITIALIZATION_FAILED" | "RECONCILIATION_BLOCKED" | "RECONCILIATION_FAILED" | "VALIDATION_BLOCKED" | "VALIDATION_FAILED" | "GATE_BLOCKED" | "PROPOSAL_BLOCKED" | "PROPOSAL_STALE" | "PROPOSAL_FAILED" | GitHubReadErrorCode | CollectionErrorCode | FilterBlockingReason | EvidenceCatalogErrorCode | ProfileComposerErrorCode;
 
 export interface CoordinatorError {
   code: CoordinatorErrorCode;
@@ -105,7 +115,7 @@ export interface CoordinatorError {
 
 export interface CoordinatorFailureDiagnostic {
   level: "error";
-  event: "run_initialization_failed" | "filter_blocked" | "reconciliation_blocked" | "gate_blocked";
+  event: "run_initialization_failed" | "filter_blocked" | "reconciliation_blocked" | "gate_blocked" | "proposal_blocked";
   code: CoordinatorErrorCode;
   message: string;
   retryCount: number;
@@ -114,8 +124,8 @@ export interface CoordinatorFailureDiagnostic {
 }
 
 export type CoordinatorResult =
-  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; reconciliation: ProfileReconciliationResult; validation: ValidationResult; gate: MandatoryGateResult; proposalAuthorization: ProposalAuthorization; diagnostic: GateCompletedDiagnostic }
-  | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult; reconciliation?: ProfileReconciliationResult; validation?: ValidationResult; gate?: MandatoryGateResult };
+  | { ok: true; context: RunContext; repository: GitHubRepositoryMetadata; filtered: RepositoryFilterResult; analysis: TechnologyAnalysisResult; evidenceCatalog: EvidenceCatalogResult; composition: ProfileCompositionResult; reconciliation: ProfileReconciliationResult; validation: ValidationResult; gate: MandatoryGateResult; proposalAuthorization: ProposalAuthorization; proposal: ProposalResult; diagnostic: ProposalCompletedDiagnostic }
+  | { ok: false; error: CoordinatorError; diagnostic: CoordinatorFailureDiagnostic; context?: RunContext; filtered?: RepositoryFilterResult; reconciliation?: ProfileReconciliationResult; validation?: ValidationResult; gate?: MandatoryGateResult; proposal?: ProposalResult };
 
 export interface CoordinatorDependencies {
   createRunId?: () => string;
@@ -125,6 +135,7 @@ export interface CoordinatorDependencies {
   secretScanner?: SecretScanner;
   automatedTests?: AutomatedTestResult | ((binding: AutomatedTestBinding, signal: AbortSignal) => AutomatedTestResult | Promise<AutomatedTestResult>);
   automatedTestTimeoutMs?: number;
+  proposalWriteClient?: ProposalWriteClient;
 }
 
 const ALLOWED_CONFIGURATION_KEYS = new Set([
@@ -272,11 +283,52 @@ export async function coordinateRun(
         gate,
       };
     }
+    const proposal = await submitTechnicalProfileProposal({
+      runId,
+      configuration,
+      repository,
+      filtered,
+      snapshot: { branch: collection.defaultBranch, commitSha: collection.snapshotCommitSha, treeSha: collection.snapshotTreeSha, readRetryCount: collection.readRetryCount },
+      composition,
+      reconciliation,
+      gate,
+      authorization: gate.proposalAuthorization,
+      ...(dependencies.secretScanner?.version === undefined ? {} : { scannerVersion: dependencies.secretScanner.version }),
+      readClient: client,
+      ...(dependencies.proposalWriteClient === undefined ? {} : { writeClient: dependencies.proposalWriteClient }),
+    });
+    if (proposal.status !== "CREATED" && proposal.status !== "NO_CHANGES") {
+      const stale = proposal.status === "STALE";
+      const code = stale ? "PROPOSAL_STALE" : proposal.status === "BLOCKED" ? "PROPOSAL_BLOCKED" : "PROPOSAL_FAILED";
+      const message = stale
+        ? "The default branch changed after validation; no proposal was made. Rerun the complete pipeline on the latest snapshot."
+        : proposal.status === "BLOCKED"
+          ? "Proposal capability or authorization was unavailable or invalid; no branch or pull request was created."
+          : "Proposal creation failed safely; the approved default branch was not changed.";
+      return {
+        ok: false,
+        error: { code, message, retryCount: 0 },
+        diagnostic: {
+          level: "error",
+          event: "proposal_blocked",
+          code,
+          message,
+          retryCount: 0,
+          runId,
+          normalizedRepositoryId: configuration.normalizedRepositoryId,
+        },
+        context: { ...context, stage: "GATE_CHECKED", status: "failed" },
+        filtered,
+        validation,
+        gate,
+        proposal,
+      };
+    }
     const hasPartialEvidence = collection.status === "partial" || filtered.status === "partial" ||
       analysis.issues.length > 0 || evidenceCatalog.issues.length > 0;
     const evidencedContext: RunContext = {
       ...context,
-      stage: "GATE_CHECKED",
+      stage: "PROPOSED",
       status: hasPartialEvidence ? "partial" : context.status,
     };
 
@@ -292,9 +344,10 @@ export async function coordinateRun(
       validation,
       gate,
       proposalAuthorization: gate.proposalAuthorization,
+      proposal,
       diagnostic: {
         level: "info",
-        event: "gate_completed",
+        event: proposal.status === "CREATED" ? "proposal_created" : "proposal_no_changes",
         runId,
         normalizedRepositoryId: repository.normalizedRepositoryId,
         repositoryId: repository.repositoryId,
@@ -332,9 +385,13 @@ export async function coordinateRun(
         gateCheckCount: gate.checks.length,
         gateFailureCount: gate.blockingFailures.length,
         automatedTestStatus: gate.automatedTestResult.status === "MISSING" ? "UNAVAILABLE" : gate.automatedTestResult.status,
+        proposalStatus: proposal.status,
+        changedFileCount: proposal.changedFiles.length,
+        ...(proposal.branchName === undefined ? {} : { branchName: proposal.branchName }),
+        ...(proposal.pullRequest === undefined ? {} : { pullRequestNumber: proposal.pullRequest.number, pullRequestUrl: proposal.pullRequest.url }),
         executionContext: evidencedContext.executionContext,
-        fromStage: "VALIDATED",
-        toStage: "GATE_CHECKED",
+        fromStage: "GATE_CHECKED",
+        toStage: "PROPOSED",
         status: evidencedContext.status,
       },
     };

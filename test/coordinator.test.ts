@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { coordinateRun } from "../src/coordinator.js";
 import { GitHubReadError } from "../src/github-errors.js";
 import { AUTOMATED_TEST_SUITE_VERSION, type AutomatedTestBinding, type AutomatedTestResult } from "../src/gate.js";
 import type { SecretScanner } from "../src/filter.js";
+import type { ProposalWriteCapability, ProposalWriteClient } from "../src/proposal.js";
 
 const FIXED_UUID = "00000000-0000-4000-8000-000000000001";
 const FIXED_TIME = new Date("2026-10-07T12:00:00.000Z");
@@ -34,11 +35,52 @@ function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
   return {
     status: "PASS",
     suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: 165,
-    passedTests: 165,
+    totalTests: 188,
+    passedTests: 188,
     failedTests: 0,
     skippedTests: 0,
     binding,
+  };
+}
+
+function fakeProposalWriteClient(): ProposalWriteClient {
+  const capability: ProposalWriteCapability = {
+    provider: "dedicated_github_proposal_app",
+    normalizedRepositoryId: VALID_CONFIGURATION.normalizedRepositoryId,
+    repositoryId: FAKE_REPOSITORY.repositoryId,
+    permissions: {
+      contents: "write",
+      pullRequests: "write",
+      canApprove: false,
+      canMerge: false,
+      canBypassBranchProtection: false,
+      canWriteDefaultBranch: false,
+    },
+    branchProtection: { pullRequestRequired: true, humanApprovalRequired: true, proposalAppBypass: false },
+  };
+  return {
+    capability,
+    createFeatureBranch: async (input) => ({
+      status: "CREATED",
+      branchName: input.branchName,
+      baseCommitSha: input.baseCommitSha,
+    }),
+    commitSingleProfileFile: async (input) => ({
+      commitSha: "c".repeat(40),
+      parentCommitSha: input.baseCommitSha,
+      treeSha: "d".repeat(40),
+      changedPaths: [input.path],
+      profileSha256: createHash("sha256").update(input.content.replace(/\r\n/g, "\n"), "utf8").digest("hex"),
+    }),
+    getBranchHead: async (input) => ({ branchName: input.branchName, commitSha: "c".repeat(40) }),
+    createPullRequest: async (input) => ({
+      number: 1,
+      url: "https://github.com/Octo-Org/Docs/pull/1",
+      state: "open",
+      headBranch: input.headBranch,
+      baseBranch: input.baseBranch,
+    }),
+    closePullRequest: async () => true,
   };
 }
 
@@ -65,6 +107,7 @@ function fakeDependencies() {
     } satisfies SecretScanner,
     automatedTests: (binding: AutomatedTestBinding) => passingTestResult(binding),
     automatedTestTimeoutMs: 100,
+    proposalWriteClient: fakeProposalWriteClient(),
   };
 }
 
@@ -107,7 +150,7 @@ test("moves through collection and filtering using one immutable snapshot", asyn
     return;
   }
 
-  assert.equal(result.context.stage, "GATE_CHECKED");
+  assert.equal(result.context.stage, "PROPOSED");
   assert.equal(result.context.status, "ready");
   assert.equal(result.context.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.equal(result.filtered.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
@@ -138,12 +181,15 @@ test("moves through collection and filtering using one immutable snapshot", asyn
   assert.equal(result.diagnostic.defaultBranch, "trunk");
   assert.equal(result.diagnostic.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.equal(result.diagnostic.profilePresent, false);
-  assert.equal(result.diagnostic.event, "gate_completed");
-  assert.equal(result.diagnostic.fromStage, "VALIDATED");
-  assert.equal(result.diagnostic.toStage, "GATE_CHECKED");
+  assert.equal(result.diagnostic.event, "proposal_created");
+  assert.equal(result.diagnostic.fromStage, "GATE_CHECKED");
+  assert.equal(result.diagnostic.toStage, "PROPOSED");
   assert.equal(result.diagnostic.validationStatus, "PASS");
   assert.equal(result.diagnostic.gateStatus, "PASS");
   assert.equal(result.diagnostic.automatedTestStatus, "PASS");
+  assert.equal(result.proposal.status, "CREATED");
+  assert.equal(result.diagnostic.proposalStatus, "CREATED");
+  assert.equal(result.diagnostic.pullRequestNumber, 1);
   assert.equal(result.diagnostic.coverageEntryCount, 16);
 });
 
@@ -181,7 +227,7 @@ test("returns observations from sanitized snapshot files through coordinator int
   if (!result.ok) {
     return;
   }
-  assert.equal(result.context.stage, "GATE_CHECKED");
+  assert.equal(result.context.stage, "PROPOSED");
   assert.equal(result.analysis.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.ok(result.analysis.observations.some((observation) =>
     observation.category === "package_name" && observation.value === "coordinator-fixture"));
@@ -384,4 +430,18 @@ test("blocks gate progression when the automated test result is missing or faile
     assert.ok(result.gate?.blockingFailures.some((failure) => failure.code === "AUTOMATED_TESTS_TIMED_OUT"));
     assert.equal("proposalAuthorization" in result, false);
   });
+});
+
+test("blocks proposal creation when the dedicated proposal App adapter is unavailable", async () => {
+  const { proposalWriteClient: _proposalClient, ...dependencies } = fakeDependencies();
+  const result = await coordinateRun(VALID_CONFIGURATION, dependencies);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.error.code, "PROPOSAL_BLOCKED");
+  assert.equal(result.context?.stage, "GATE_CHECKED");
+  assert.equal(result.gate?.status, "PASS");
+  assert.equal(result.proposal?.status, "BLOCKED");
+  assert.equal(result.proposal?.failureCode, "PROPOSAL_CAPABILITY_UNAVAILABLE");
+  assert.equal("proposalAuthorization" in result, false);
 });
