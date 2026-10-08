@@ -49,8 +49,8 @@ const SCANNER_VERSION = "test-double/1";
 const TEST_RESULT_BASE = {
   status: "PASS" as const,
   suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-  totalTests: 201,
-  passedTests: 201,
+  totalTests: 203,
+  passedTests: 203,
   failedTests: 0,
   skippedTests: 0,
 };
