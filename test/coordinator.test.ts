@@ -6,6 +6,7 @@ import test from "node:test";
 import type { RunConfiguration } from "../src/config.js";
 import { coordinateRun } from "../src/coordinator.js";
 import { GitHubReadError } from "../src/github-errors.js";
+import { createBoundAutomatedTestAttestation } from "../src/index.js";
 import { AUTOMATED_TEST_SUITE_VERSION, type AutomatedTestBinding, type AutomatedTestResult } from "../src/gate.js";
 import type { SecretScanner } from "../src/filter.js";
 import type { ProposalWriteCapability, ProposalWriteClient } from "../src/proposal.js";
@@ -35,8 +36,8 @@ function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
   return {
     status: "PASS",
     suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: 203,
-    passedTests: 203,
+    totalTests: 209,
+    passedTests: 209,
     failedTests: 0,
     skippedTests: 0,
     binding,
@@ -401,6 +402,19 @@ test("CLI rejects branch overrides before contacting GitHub", () => {
 
   assert.equal(result.status, 2);
   assert.match(result.stderr, /Branch overrides/);
+
+  const binding: AutomatedTestBinding = {
+    runId: `run-${FIXED_UUID}`,
+    targetRepository: VALID_CONFIGURATION.normalizedRepositoryId,
+    snapshotCommitSha: FAKE_SNAPSHOT.commitSha,
+    candidateSha256: "c".repeat(64),
+    schemaVersion: 1,
+  };
+  const attestation = createBoundAutomatedTestAttestation(binding, { DOCS_SYNC_AUTOMATED_TESTS_PASSED: "true" });
+  assert.equal(attestation.status, "PASS");
+  assert.equal(attestation.totalTests, 209);
+  assert.deepEqual(attestation.binding, binding);
+  assert.equal(createBoundAutomatedTestAttestation(binding, {}).status, "UNAVAILABLE");
 });
 
 test("blocks gate progression when the automated test result is missing or failed", async (t) => {
@@ -513,4 +527,31 @@ test("reports an overall run timeout without authorizing a proposal", async () =
   assert.equal(result.report.outcome, "FAILED");
   assert.ok(result.report.errors.some((error) => error.code === "RUN_TIMEOUT"));
   assert.equal("proposalAuthorization" in result, false);
+});
+
+test("creates the proposal adapter only after the mandatory gate passes", async () => {
+  const { proposalWriteClient: _writer, ...dependencies } = fakeDependencies();
+  let factoryCalls = 0;
+  const passing = await coordinateRun(VALID_CONFIGURATION, {
+    ...dependencies,
+    createProposalWriteClient: () => {
+      factoryCalls += 1;
+      return fakeProposalWriteClient();
+    },
+  });
+
+  assert.equal(passing.ok, true);
+  assert.equal(factoryCalls, 1);
+
+  const { secretScanner: _scanner, ...withoutScanner } = dependencies;
+  const blocked = await coordinateRun(VALID_CONFIGURATION, {
+    ...withoutScanner,
+    createProposalWriteClient: () => {
+      factoryCalls += 1;
+      return fakeProposalWriteClient();
+    },
+  });
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) assert.equal(blocked.error.code, "SCANNER_UNAVAILABLE");
+  assert.equal(factoryCalls, 1);
 });

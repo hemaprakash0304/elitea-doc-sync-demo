@@ -38,6 +38,9 @@ export type ProposalFailureCode =
   | "PULL_REQUEST_FAILED"
   | "PULL_REQUEST_RESPONSE_INVALID"
   | "PROPOSAL_TIMED_OUT"
+  | "OPEN_PROPOSAL_EXISTS"
+  | "OPEN_PROPOSAL_CONFLICT"
+  | "OPEN_PROPOSAL_STATE_UNVERIFIED"
   | "STALE_PULL_REQUEST_CLOSED"
   | "STALE_PULL_REQUEST_CLOSE_FAILED";
 
@@ -64,6 +67,7 @@ export interface ProposalBranchResult {
   status: "CREATED" | "ALREADY_EXISTS";
   branchName: string;
   baseCommitSha: string;
+  failureCode?: "BRANCH_COLLISION" | "OPEN_PROPOSAL_EXISTS" | "OPEN_PROPOSAL_CONFLICT" | "OPEN_PROPOSAL_STATE_UNVERIFIED";
 }
 
 export interface ProposalCommitResult {
@@ -90,6 +94,7 @@ export interface ProposalWriteClient {
     branchName: string;
     baseBranch: string;
     baseCommitSha: string;
+    candidateSha256: string;
     signal: AbortSignal;
   }): Promise<ProposalBranchResult>;
   commitSingleProfileFile(input: {
@@ -125,6 +130,11 @@ export interface ProposalWriteClient {
     signal: AbortSignal;
   }): Promise<boolean>;
 }
+
+export type ProposalWriteClientFactory = (
+  configuration: RunConfiguration,
+  repository: GitHubRepositoryMetadata,
+) => ProposalWriteClient | undefined;
 
 export interface ProposalInput {
   runId: string;
@@ -205,6 +215,7 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
       branchName,
       baseBranch: input.repository.defaultBranch,
       baseCommitSha: input.snapshot.commitSha,
+      candidateSha256,
       signal,
     }));
   } catch (error) {
@@ -214,7 +225,14 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
     return { ...base, status: "FAILED", changedFiles: [], branchName, failureCode: "BRANCH_CREATE_FAILED" };
   }
   if (branch.status === "ALREADY_EXISTS") {
-    return { ...base, status: "FAILED", changedFiles: [], branchName, failureCode: "BRANCH_COLLISION" };
+    const failureCode = branch.failureCode ?? "BRANCH_COLLISION";
+    return {
+      ...base,
+      status: failureCode === "BRANCH_COLLISION" ? "FAILED" : "BLOCKED",
+      changedFiles: [],
+      branchName,
+      failureCode,
+    };
   }
   if (branch.branchName !== branchName || branch.baseCommitSha.toLowerCase() !== input.snapshot.commitSha.toLowerCase()) {
     return { ...base, status: "FAILED", changedFiles: [], branchName, failureCode: "BRANCH_CREATE_FAILED" };

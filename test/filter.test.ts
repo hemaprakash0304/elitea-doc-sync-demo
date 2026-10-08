@@ -16,6 +16,7 @@ import {
   type SecretScanOutcome,
   type SecretScanner,
 } from "../src/filter.js";
+import { GitleaksSecretScanner } from "../src/gitleaks-scanner.js";
 
 const SNAPSHOT_SHA = "a".repeat(40);
 const REPOSITORY = {
@@ -26,6 +27,21 @@ const REPOSITORY = {
   defaultBranch: "release/next",
   readRetryCount: 0,
 };
+
+test("runs the pinned local Gitleaks binary and returns only sanitized finding metadata", async () => {
+  const scanner = new GitleaksSecretScanner();
+  const syntheticValue = "SYNTHETIC_ONLY_TOKEN=FIXTURE_VALUE_NOT_A_CREDENTIAL_123";
+  const result = await scanner.scan([
+    { path: "src/clean.ts", content: "export const ready = true;" },
+    { path: "src/synthetic.ts", content: `export const token = "${syntheticValue}";` },
+  ]);
+
+  assert.equal(scanner.version, "gitleaks/8.30.1");
+  assert.equal(result.status, "complete", JSON.stringify(result));
+  assert.equal(result.scannedFileCount, 2);
+  assert.deepEqual(result.findings.map((finding) => finding.path), ["src/synthetic.ts"]);
+  assert.doesNotMatch(JSON.stringify(result), /FIXTURE_VALUE_NOT_A_CREDENTIAL_123/);
+});
 
 class SyntheticSecretScanner implements SecretScanner {
   readonly id = "test_double" as const;

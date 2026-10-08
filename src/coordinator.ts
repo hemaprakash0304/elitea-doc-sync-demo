@@ -35,6 +35,7 @@ import {
 import {
   submitTechnicalProfileProposal,
   type ProposalResult,
+  type ProposalWriteClientFactory,
   type ProposalWriteClient,
 } from "./proposal.js";
 import { createSanitizedRunReport, type SanitizedRunReport } from "./report.js";
@@ -145,6 +146,7 @@ export interface CoordinatorDependencies {
   automatedTests?: AutomatedTestResult | ((binding: AutomatedTestBinding, signal: AbortSignal) => AutomatedTestResult | Promise<AutomatedTestResult>);
   automatedTestTimeoutMs?: number;
   proposalWriteClient?: ProposalWriteClient;
+  createProposalWriteClient?: ProposalWriteClientFactory;
   operationalLimits?: OperationalLimitOverrides;
 }
 
@@ -164,7 +166,7 @@ export async function coordinateRun(
 ): Promise<CoordinatorResult> {
   const operationalLimits = resolveOperationalLimits(dependencies.operationalLimits);
   let releaseProposalRun: (() => void) | undefined;
-  if (dependencies.proposalWriteClient !== undefined && isRunConfiguration(configuration)) {
+  if ((dependencies.proposalWriteClient !== undefined || dependencies.createProposalWriteClient !== undefined) && isRunConfiguration(configuration)) {
     releaseProposalRun = tryAcquireProposalRunLock(configuration.normalizedRepositoryId);
     if (releaseProposalRun === undefined) {
       const runId = `run-${randomUUID()}`;
@@ -365,6 +367,7 @@ async function executeCoordinatorRun(
       };
     }
     assertRunDeadline(deadlineAtMs, "PROPOSAL");
+    const writeClient = dependencies.proposalWriteClient ?? dependencies.createProposalWriteClient?.(configuration, repository);
     const proposal = await submitTechnicalProfileProposal({
       runId,
       configuration,
@@ -379,7 +382,7 @@ async function executeCoordinatorRun(
       proposalOperationTimeoutMs: Math.min(operationalLimits.proposalOperationTimeoutMs, Math.max(1, deadlineAtMs - Date.now())),
       deadlineAtMs,
       readClient: client,
-      ...(dependencies.proposalWriteClient === undefined ? {} : { writeClient: dependencies.proposalWriteClient }),
+      ...(writeClient === undefined ? {} : { writeClient }),
     });
     assertRunDeadline(deadlineAtMs, "PROPOSAL");
     if (proposal.status !== "CREATED" && proposal.status !== "NO_CHANGES") {
@@ -388,7 +391,13 @@ async function executeCoordinatorRun(
       const message = stale
         ? "The default branch changed after validation; no proposal was made. Rerun the complete pipeline on the latest snapshot."
         : proposal.status === "BLOCKED"
-          ? "Proposal capability or authorization was unavailable or invalid; no branch or pull request was created."
+          ? proposal.failureCode === "OPEN_PROPOSAL_EXISTS"
+            ? "An exact matching open proposal already exists; no duplicate branch or pull request was created."
+            : proposal.failureCode === "OPEN_PROPOSAL_CONFLICT"
+              ? "A different open technical-profile proposal exists; resolve it before retrying. No new branch or pull request was created."
+              : proposal.failureCode === "OPEN_PROPOSAL_STATE_UNVERIFIED"
+                ? "Open proposal state could not be verified; no new branch or pull request was created."
+                : "Proposal capability or authorization was unavailable or invalid; no branch or pull request was created."
           : "Proposal creation failed safely; the approved default branch was not changed.";
       return {
         ok: false,
