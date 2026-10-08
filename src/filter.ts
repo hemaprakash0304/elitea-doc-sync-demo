@@ -40,6 +40,7 @@ export interface SecretScanOutcome {
 export interface SecretScanner {
   readonly id: SecretScannerId;
   readonly executionBoundary: "local";
+  readonly version?: string;
   scan(files: readonly SecretScanInputFile[]): Promise<SecretScanOutcome>;
 }
 
