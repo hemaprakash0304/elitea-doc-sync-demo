@@ -92,7 +92,7 @@ test("moves through collection and filtering using one immutable snapshot", asyn
     return;
   }
 
-  assert.equal(result.context.stage, "RECONCILED");
+  assert.equal(result.context.stage, "VALIDATED");
   assert.equal(result.context.status, "ready");
   assert.equal(result.context.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.equal(result.filtered.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
@@ -109,6 +109,8 @@ test("moves through collection and filtering using one immutable snapshot", asyn
   assert.equal(result.composition.candidateSha256.length, 64);
   assert.match(result.composition.candidate, /^# Technical Profile\n/);
   assert.equal(result.reconciliation.status, "FIRST_GENERATION");
+  assert.equal(result.validation.status, "PASS");
+  assert.ok(result.validation.checks.length > 0);
   assert.equal(result.reconciliation.candidate, result.composition.candidate);
   assert.equal(result.reconciliation.candidateSha256, result.composition.candidateSha256);
   assert.equal("collection" in result, false);
@@ -116,9 +118,10 @@ test("moves through collection and filtering using one immutable snapshot", asyn
   assert.equal(result.diagnostic.defaultBranch, "trunk");
   assert.equal(result.diagnostic.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.equal(result.diagnostic.profilePresent, false);
-  assert.equal(result.diagnostic.event, "reconciliation_completed");
-  assert.equal(result.diagnostic.fromStage, "COMPOSED");
-  assert.equal(result.diagnostic.toStage, "RECONCILED");
+  assert.equal(result.diagnostic.event, "validation_completed");
+  assert.equal(result.diagnostic.fromStage, "RECONCILED");
+  assert.equal(result.diagnostic.toStage, "VALIDATED");
+  assert.equal(result.diagnostic.validationStatus, "PASS");
   assert.equal(result.diagnostic.coverageEntryCount, 16);
 });
 
@@ -155,7 +158,7 @@ test("returns observations from sanitized snapshot files through coordinator int
   if (!result.ok) {
     return;
   }
-  assert.equal(result.context.stage, "RECONCILED");
+  assert.equal(result.context.stage, "VALIDATED");
   assert.equal(result.analysis.snapshotCommitSha, FAKE_SNAPSHOT.commitSha);
   assert.ok(result.analysis.observations.some((observation) =>
     observation.category === "package_name" && observation.value === "coordinator-fixture"));
