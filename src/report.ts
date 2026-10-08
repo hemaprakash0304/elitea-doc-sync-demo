@@ -174,6 +174,9 @@ const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   PROPOSAL_STALE: "The validated repository snapshot became stale.",
   PROPOSAL_FAILED: "The proposal could not be completed safely.",
   PROPOSAL_TIMED_OUT: "A proposal operation exceeded its configured timeout.",
+  OPEN_PROPOSAL_EXISTS: "An exact matching open proposal already exists.",
+  OPEN_PROPOSAL_CONFLICT: "A different open technical profile proposal exists.",
+  OPEN_PROPOSAL_STATE_UNVERIFIED: "Open proposal state could not be verified.",
   REPORT_UNSAFE: "The report failed a safety check and was redacted.",
   RUN_FAILED: "The run could not be completed safely.",
 };

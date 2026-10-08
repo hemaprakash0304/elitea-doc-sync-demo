@@ -349,10 +349,16 @@ function renderLimitations(catalog: EvidenceCatalogResult): TableRow[] {
         coverage.evidenceIds,
       ));
     } else if (coverage.status === "supported_by_conflicting_evidence") {
+      const relatedEvidenceIds = new Set(coverage.conflictingEvidenceIds);
+      for (const item of catalog.evidence) {
+        if (coverage.conflictingEvidenceIds.includes(item.evidenceId)) {
+          item.conflictsWith.forEach((evidenceId) => relatedEvidenceIds.add(evidenceId));
+        }
+      }
       rows.push(row(
         [coverage.profileField, "Credible repository sources disagree; review the cited evidence."],
         "Conflict",
-        coverage.conflictingEvidenceIds,
+        [...relatedEvidenceIds],
       ));
     } else if (coverage.issues.length > 0) {
       rows.push(row(

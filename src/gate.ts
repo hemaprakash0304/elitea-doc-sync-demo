@@ -10,8 +10,8 @@ import type { ValidationCheckId, ValidationResult } from "./validation.js";
 
 export const MANDATORY_GATE_VERSION = "IMP-13/1";
 export const VALIDATOR_VERSION = "IMP-11/1";
-export const AUTOMATED_TEST_SUITE_VERSION = "IMP-17/1";
-export const REQUIRED_AUTOMATED_TEST_COUNT = 203;
+export const AUTOMATED_TEST_SUITE_VERSION = "IMP-17/3";
+export const REQUIRED_AUTOMATED_TEST_COUNT = 209;
 
 export type MandatoryGateStatus = "PASS" | "BLOCKED";
 export type AutomatedTestStatus =
