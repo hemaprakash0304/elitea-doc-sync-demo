@@ -658,6 +658,7 @@ function validateCandidateStatuses(candidate: string, catalog: EvidenceCatalogRe
       }
       if (status === "Unable to Verify" && referenced.length === 0 &&
         coverageBySection.get(section.id)?.status !== "unable_to_verify" &&
+        (coverageBySection.get(section.id)?.issues.length ?? 0) === 0 &&
         !/not established|unavailable|excluded|incomplete|unable to verify/i.test(factText)) {
         issues.push({ code: "STATUS_EVIDENCE_MISMATCH", sectionId: section.id });
       }

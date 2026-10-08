@@ -358,7 +358,7 @@ function renderLimitations(catalog: EvidenceCatalogResult): TableRow[] {
       rows.push(row(
         [coverage.profileField, issueExplanation(coverage)],
         "Unable to Verify",
-        coverage.evidenceIds,
+        [],
       ));
     }
   }

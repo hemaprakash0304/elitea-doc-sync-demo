@@ -24,8 +24,8 @@ function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
   return {
     status: "PASS",
     suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: 201,
-    passedTests: 201,
+    totalTests: 203,
+    passedTests: 203,
     failedTests: 0,
     skippedTests: 0,
     binding,
@@ -45,6 +45,7 @@ interface SnapshotFixture {
   originalFiles: Map<string, string>;
   calls: SnapshotCalls;
   scanner: SyntheticScanner;
+  proposalCalls: Array<{ method: string; input?: unknown }>;
 }
 
 class SyntheticScanner implements SecretScanner {
@@ -66,7 +67,7 @@ class SyntheticScanner implements SecretScanner {
   }
 }
 
-function syntheticProposalClient(): ProposalWriteClient {
+function syntheticProposalClient(proposalCalls: SnapshotFixture["proposalCalls"]): ProposalWriteClient {
   const capability: ProposalWriteCapability = {
     provider: "dedicated_github_proposal_app",
     normalizedRepositoryId: CONFIGURATION.normalizedRepositoryId,
@@ -83,23 +84,38 @@ function syntheticProposalClient(): ProposalWriteClient {
   };
   return {
     capability,
-    createFeatureBranch: async (input) => ({ status: "CREATED", branchName: input.branchName, baseCommitSha: input.baseCommitSha }),
-    commitSingleProfileFile: async (input) => ({
-      commitSha: "c".repeat(40),
-      parentCommitSha: input.baseCommitSha,
-      treeSha: "d".repeat(40),
-      changedPaths: [input.path],
-      profileSha256: sha256(input.content),
-    }),
-    getBranchHead: async (input) => ({ branchName: input.branchName, commitSha: "c".repeat(40) }),
-    createPullRequest: async (input) => ({
-      number: 1,
-      url: "https://github.com/Sample/EliteA-Pipeline-Fixture/pull/1",
-      state: "open",
-      headBranch: input.headBranch,
-      baseBranch: input.baseBranch,
-    }),
-    closePullRequest: async () => true,
+    createFeatureBranch: async (input) => {
+      proposalCalls.push({ method: "createFeatureBranch", input });
+      return { status: "CREATED", branchName: input.branchName, baseCommitSha: input.baseCommitSha };
+    },
+    commitSingleProfileFile: async (input) => {
+      proposalCalls.push({ method: "commitSingleProfileFile", input });
+      return {
+        commitSha: "c".repeat(40),
+        parentCommitSha: input.baseCommitSha,
+        treeSha: "d".repeat(40),
+        changedPaths: [input.path],
+        profileSha256: sha256(input.content),
+      };
+    },
+    getBranchHead: async (input) => {
+      proposalCalls.push({ method: "getBranchHead", input });
+      return { branchName: input.branchName, commitSha: "c".repeat(40) };
+    },
+    createPullRequest: async (input) => {
+      proposalCalls.push({ method: "createPullRequest", input });
+      return {
+        number: 1,
+        url: "https://github.com/Sample/EliteA-Pipeline-Fixture/pull/1",
+        state: "open",
+        headBranch: input.headBranch,
+        baseBranch: input.baseBranch,
+      };
+    },
+    closePullRequest: async (input) => {
+      proposalCalls.push({ method: "closePullRequest", input });
+      return true;
+    },
   };
 }
 
@@ -121,6 +137,7 @@ function snapshotFixture(
   });
   const treeSha = createHash("sha1").update(JSON.stringify(entries), "utf8").digest("hex");
   const calls: SnapshotCalls = { metadata: 0, branches: [], trees: [], blobs: [] };
+  const proposalCalls: SnapshotFixture["proposalCalls"] = [];
   const repository: GitHubRepositoryMetadata = {
     repositoryId: 42,
     normalizedRepositoryId: CONFIGURATION.normalizedRepositoryId,
@@ -157,7 +174,7 @@ function snapshotFixture(
       };
     },
   };
-  return { client, files, originalFiles, calls, scanner };
+  return { client, files, originalFiles, calls, scanner, proposalCalls };
 }
 
 function nodeProject(dependencies: Record<string, string> = {}): string {
@@ -183,7 +200,7 @@ async function runSnapshot(
     secretScanner: fixture.scanner,
     automatedTests: (binding: AutomatedTestBinding) => passingTestResult(binding),
     automatedTestTimeoutMs: 100,
-    proposalWriteClient: syntheticProposalClient(),
+    proposalWriteClient: syntheticProposalClient(fixture.proposalCalls),
   });
   return { fixture, result };
 }
@@ -228,7 +245,7 @@ function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-test("runs first generation through validation and repeats deterministically without writes", async () => {
+test("runs first generation through the fake proposal boundary and repeats deterministically", async () => {
   const sourceFiles = {
     "README.md": "# Pipeline app\nA synthetic application fixture.\n",
     "package.json": nodeProject({ zod: "^3.0.0" }),
@@ -261,6 +278,12 @@ test("runs first generation through validation and repeats deterministically wit
   assert.equal(result.gate.status, "PASS");
   assert.equal(result.proposalAuthorization.status, "AUTHORIZED");
   assert.equal(result.proposal.status, "CREATED");
+  assert.deepEqual(first.fixture.proposalCalls.map((call) => call.method), [
+    "createFeatureBranch", "commitSingleProfileFile", "getBranchHead", "createPullRequest",
+  ]);
+  const proposedCommit = first.fixture.proposalCalls[1]?.input as { path: string; content: string };
+  assert.equal(proposedCommit.path, TECHNICAL_PROFILE_PATH);
+  assert.equal(proposedCommit.content, result.reconciliation.candidate);
   assert.equal(result.reconciliation.candidate, result.composition.candidate);
   assert.equal(first.fixture.calls.metadata, 4);
   assert.deepEqual(first.fixture.calls.branches, Array(4).fill(DEFAULT_BRANCH));
@@ -273,6 +296,8 @@ test("runs first generation through validation and repeats deterministically wit
   assert.equal(second.composition.candidate, result.composition.candidate);
   assert.deepEqual(second.evidenceCatalog.evidence, result.evidenceCatalog.evidence);
   assert.equal(second.composition.candidateSha256, result.composition.candidateSha256);
+  assert.deepEqual(second.validation, result.validation);
+  assert.deepEqual(second.report, result.report);
 });
 
 test("returns NO_CHANGES for an identical generated profile and preserves manual notes", async () => {
@@ -288,6 +313,7 @@ test("returns NO_CHANGES for an identical generated profile and preserves manual
   assert.equal(result.report.proposal?.status, "NO_CHANGES");
   assert.equal(result.report.proposal?.pullRequestNumber, undefined);
   assert.equal(result.report.counts.proposalChangedFiles, 0);
+  assert.deepEqual(run.fixture.proposalCalls, []);
   assert.equal(result.reconciliation.candidate, existingProfile);
   assert.equal(result.reconciliation.candidateSha256?.length, 64);
   assert.deepEqual(result.reconciliation.additions, []);
@@ -345,6 +371,11 @@ test("updates changed evidence and removes obsolete generated evidence without r
   assert.doesNotMatch(dependencySection, /\^1\.0\.0|obsolete|~2\.0\.0/);
   assert.equal(result.validation.status, "PASS");
   assert.equal(result.gate.status, "PASS");
+  assert.equal(result.proposalAuthorization.binding.candidateSha256, result.reconciliation.candidateSha256);
+  assert.notEqual(result.proposalAuthorization.binding.candidateSha256, originalResult.reconciliation.candidateSha256);
+  assert.deepEqual(run.fixture.proposalCalls.map((call) => call.method), [
+    "createFeatureBranch", "commitSingleProfileFile", "getBranchHead", "createPullRequest",
+  ]);
   assert.deepEqual([...run.fixture.files], [...run.fixture.originalFiles]);
 });
 
@@ -362,6 +393,27 @@ test("surfaces conflicting manifest and repository-name evidence with traceable 
     assert.match(nameRow, new RegExp(item.evidenceId));
     assert.match(profileSection(result.reconciliation.candidate ?? "", "16"), new RegExp(item.evidenceId));
   }
+});
+
+test("excludes synthetic secret source content from the profile, report, and proposal payload", async () => {
+  const syntheticValue = "SYNTHETIC_ONLY_TOKEN=PIPELINE_FIXTURE_NOT_A_CREDENTIAL_123";
+  const run = await runSnapshot({
+    "package.json": nodeProject(),
+    "src/config.ts": `export const token = "${syntheticValue}";\n`,
+  });
+  const result = requireSuccess(run.result);
+  const serializedOutputs = JSON.stringify({
+    candidate: result.reconciliation.candidate,
+    evidence: result.evidenceCatalog.evidence,
+    report: result.report,
+    proposalCalls: run.fixture.proposalCalls,
+  });
+
+  assert.equal(result.filtered.status, "partial");
+  assert.deepEqual(result.filtered.analysisFiles.map((file) => file.path), ["package.json"]);
+  assert.ok(result.filtered.securityFindings.some((finding) => finding.path === "src/config.ts" && finding.action === "file_excluded"));
+  assert.equal(result.gate.status, "PASS");
+  assert.doesNotMatch(serializedOutputs, /PIPELINE_FIXTURE_NOT_A_CREDENTIAL_123/);
 });
 
 test("preserves approved profile bytes and emits no candidate when scanning or reconciliation fails", async (t) => {
@@ -394,5 +446,25 @@ test("preserves approved profile bytes and emits no candidate when scanning or r
     assert.equal(run.result.reconciliation?.existingProfilePreserved, true);
     assert.equal(run.fixture.files.get(TECHNICAL_PROFILE_PATH), originalProfile);
     assert.deepEqual([...run.fixture.files], [...run.fixture.originalFiles]);
+  });
+
+  await t.test("secret-shaped value in existing profile", async () => {
+    const secretValue = "SYNTHETIC_ONLY_SECRET=PROFILE_FIXTURE_NOT_A_CREDENTIAL_789";
+    const originalProfile = withManualNotes(validProfile).replace(
+      "Keep this approved note byte-for-byte.",
+      `Keep this approved note byte-for-byte.\n${secretValue}`,
+    );
+    const run = await runSnapshot({ ...sourceFiles, [TECHNICAL_PROFILE_PATH]: originalProfile }, SECOND_COMMIT);
+
+    assert.equal(run.result.ok, false);
+    if (run.result.ok) return;
+    assert.equal(run.result.error.code, "EXISTING_PROFILE_SECRET");
+    assert.equal(run.result.filtered?.existingProfile.status, "blocking_sensitive_finding");
+    assert.equal(run.result.gate, undefined);
+    assert.equal("proposalAuthorization" in run.result, false);
+    assert.deepEqual(run.fixture.proposalCalls, []);
+    assert.equal(run.fixture.files.get(TECHNICAL_PROFILE_PATH), originalProfile);
+    assert.deepEqual([...run.fixture.files], [...run.fixture.originalFiles]);
+    assert.doesNotMatch(JSON.stringify(run.result), /PROFILE_FIXTURE_NOT_A_CREDENTIAL_789/);
   });
 });
