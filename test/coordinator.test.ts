@@ -35,8 +35,8 @@ function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
   return {
     status: "PASS",
     suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: 195,
-    passedTests: 195,
+    totalTests: 201,
+    passedTests: 201,
     failedTests: 0,
     skippedTests: 0,
     binding,
@@ -468,5 +468,49 @@ test("blocks proposal creation when the dedicated proposal App adapter is unavai
   assert.equal(result.report.proposal?.status, "BLOCKED");
   assert.equal(result.report.proposal?.pullRequestNumber, undefined);
   assert.ok(result.report.errors.some((error) => error.code === "PROPOSAL_BLOCKED" && error.stage === "PROPOSAL"));
+  assert.equal("proposalAuthorization" in result, false);
+});
+
+test("fails fast when another proposal-capable run is active for the same repository", async () => {
+  let markTestsStarted!: () => void;
+  let releaseTests!: () => void;
+  const testsStarted = new Promise<void>((resolve) => { markTestsStarted = resolve; });
+  const holdTests = new Promise<void>((resolve) => { releaseTests = resolve; });
+  const firstRun = coordinateRun(VALID_CONFIGURATION, {
+    ...fakeDependencies(),
+    automatedTests: async (binding: AutomatedTestBinding) => {
+      markTestsStarted();
+      await holdTests;
+      return passingTestResult(binding);
+    },
+  });
+
+  await testsStarted;
+  const concurrentRun = await coordinateRun(VALID_CONFIGURATION, fakeDependencies());
+  assert.equal(concurrentRun.ok, false);
+  if (!concurrentRun.ok) {
+    assert.equal(concurrentRun.error.code, "BUSY");
+    assert.equal(concurrentRun.diagnostic.event, "busy");
+  }
+
+  releaseTests();
+  const completedRun = await firstRun;
+  assert.equal(completedRun.ok, true);
+});
+
+test("reports an overall run timeout without authorizing a proposal", async () => {
+  const result = await coordinateRun(VALID_CONFIGURATION, {
+    ...fakeDependencies(),
+    automatedTests: async () => new Promise<AutomatedTestResult>(() => undefined),
+    automatedTestTimeoutMs: 10_000,
+    operationalLimits: { overallRunTimeoutMs: 100 },
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.error.code, "RUN_TIMEOUT");
+  assert.equal(result.diagnostic.event, "run_timeout");
+  assert.equal(result.report.outcome, "FAILED");
+  assert.ok(result.report.errors.some((error) => error.code === "RUN_TIMEOUT"));
   assert.equal("proposalAuthorization" in result, false);
 });

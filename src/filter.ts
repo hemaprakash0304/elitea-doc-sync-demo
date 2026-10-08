@@ -6,6 +6,7 @@ import {
   type CollectedFile,
   type RepositoryCollectionResult,
 } from "./collection.js";
+import { DEFAULT_OPERATIONAL_LIMITS, OperationalTimeoutError, withFiniteTimeout } from "./operations.js";
 
 export type SecretScannerId = "gitleaks" | "unavailable" | "test_double";
 export type SecretScanState = "complete" | "incomplete" | "failed";
@@ -14,6 +15,7 @@ export type SecretSeverity = "low" | "medium" | "high" | "critical" | "unknown";
 export type ScannerErrorCode =
   | "SCANNER_UNAVAILABLE"
   | "SCANNER_FAILED"
+  | "SCANNER_TIMEOUT"
   | "SCAN_INCOMPLETE"
   | "INVALID_SCAN_RESULT"
   | "SCANNER_BOUNDARY_INVALID";
@@ -41,7 +43,7 @@ export interface SecretScanner {
   readonly id: SecretScannerId;
   readonly executionBoundary: "local";
   readonly version?: string;
-  scan(files: readonly SecretScanInputFile[]): Promise<SecretScanOutcome>;
+  scan(files: readonly SecretScanInputFile[], signal?: AbortSignal): Promise<SecretScanOutcome>;
 }
 
 export class UnavailableSecretScanner implements SecretScanner {
@@ -213,6 +215,7 @@ const ALLOWED_SPECIAL_FILES = new Set([
 export async function filterRepositorySnapshot(
   collection: RepositoryCollectionResult,
   scanner: SecretScanner,
+  options: { scannerTimeoutMs?: number } = {},
 ): Promise<RepositoryFilterResult> {
   const records = new Map<string, FilterRecord>();
   const pendingFiles: PendingFile[] = [];
@@ -304,7 +307,7 @@ export async function filterRepositorySnapshot(
   const scan = await executeScan(scanner, selectedFiles.map(({ file, path }) => ({
     path,
     content: file.content as string,
-  })));
+  })), options.scannerTimeoutMs);
   const findings: SanitizedSecurityFinding[] = [];
   const analysisFiles: FilteredAnalysisFile[] = [];
   let profile: ExistingProfileSafety = collection.existingProfile.profilePresent || !profileSnapshotConsistent
@@ -434,8 +437,9 @@ export async function filterRepositorySnapshot(
 export async function scanCandidateContent(
   content: string,
   scanner: SecretScanner,
+  timeoutMs = DEFAULT_OPERATIONAL_LIMITS.scannerTimeoutMs,
 ): Promise<CandidateScanResult> {
-  const scan = await executeScan(scanner, [{ path: TECHNICAL_PROFILE_PATH, content }]);
+  const scan = await executeScan(scanner, [{ path: TECHNICAL_PROFILE_PATH, content }], timeoutMs);
   if (scan.status !== "complete") {
     return {
       status: "blocked",
@@ -486,6 +490,7 @@ interface SanitizedSecretScanMatch {
 async function executeScan(
   scanner: SecretScanner,
   files: readonly SecretScanInputFile[],
+  timeoutMs = DEFAULT_OPERATIONAL_LIMITS.scannerTimeoutMs,
 ): Promise<ExecutedScan> {
   let scannerId: SecretScannerId = "unavailable";
   try {
@@ -493,7 +498,11 @@ async function executeScan(
       return failedScan(files.length, scannerId, "SCANNER_BOUNDARY_INVALID");
     }
     scannerId = isScannerId(scanner.id) ? scanner.id : "unavailable";
-    const outcome = await scanner.scan(files);
+    const outcome = await withFiniteTimeout(
+      (signal) => scanner.scan(files, signal),
+      timeoutMs,
+      "SECURITY_SCAN",
+    );
     if (!isScanState(outcome.status) || !Number.isSafeInteger(outcome.scannedFileCount) || outcome.scannedFileCount < 0) {
       return failedScan(files.length, scannerId, "INVALID_SCAN_RESULT");
     }
@@ -560,8 +569,8 @@ async function executeScan(
       findings: sanitized,
       validFindings: true,
     };
-  } catch {
-    return failedScan(files.length, scannerId, "SCANNER_FAILED");
+  } catch (error) {
+    return failedScan(files.length, scannerId, error instanceof OperationalTimeoutError ? "SCANNER_TIMEOUT" : "SCANNER_FAILED");
   }
 }
 
@@ -688,7 +697,7 @@ function isScanState(value: unknown): value is SecretScanState {
 }
 
 function isScannerErrorCode(value: unknown): value is ScannerErrorCode {
-  return value === "SCANNER_UNAVAILABLE" || value === "SCANNER_FAILED" || value === "SCAN_INCOMPLETE" ||
+  return value === "SCANNER_UNAVAILABLE" || value === "SCANNER_FAILED" || value === "SCANNER_TIMEOUT" || value === "SCAN_INCOMPLETE" ||
     value === "INVALID_SCAN_RESULT" || value === "SCANNER_BOUNDARY_INVALID";
 }
 
