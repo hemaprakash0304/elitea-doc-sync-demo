@@ -532,7 +532,8 @@ function validateReconciliationConsistency(reconciliation: ProfileReconciliation
     return [{ code: "RECONCILIATION_NOT_SUCCESSFUL" }];
   }
   const changes = [...reconciliation.additions, ...reconciliation.modifications, ...reconciliation.removals];
-  if (stableJson(changes) !== stableJson(sortChanges(changes))) {
+  const changeGroups = [reconciliation.additions, reconciliation.modifications, reconciliation.removals];
+  if (changeGroups.some((group) => stableJson(group) !== stableJson(sortChanges([...group])))) {
     return [{ code: "RECONCILIATION_NOT_SUCCESSFUL" }];
   }
   if (reconciliation.status === "NO_CHANGES" && changes.length > 0) {
