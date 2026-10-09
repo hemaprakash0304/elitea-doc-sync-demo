@@ -165,7 +165,7 @@ The generated candidate has exactly these 16 ordered sections: Application Name;
 - Step 7 files added/updated: `verification-report.md`, `code-review.md`, `src/gate.ts`, `test/coordinator.test.ts`, `test/gate.test.ts`, `test/pipeline.integration.test.ts`, `test/proposal.test.ts`, and `test/report.test.ts`.
 - npm audit: zero npm vulnerabilities; Maven artifacts are outside its scope.
 - Gitleaks 8.30.1 local binary executed; suppression-disabled synthetic-secret regression passed.
-- Current work remains uncommitted. No branch, commit, push, PR, merge, or live GitHub proposal operation was performed during Step 7.
+- Step 7 verification itself performed no commit, push, or live proposal operation. Step 8 packaged this work in commit `d0f6a29` and pushed it to the existing PR branch; no new PR was created, and no merge or live proposal write was performed.
 
 ## 10. Known Limitations
 
