@@ -33,7 +33,7 @@ test("runs the pinned local Gitleaks binary and returns only sanitized finding m
   const syntheticValue = "SYNTHETIC_ONLY_TOKEN=FIXTURE_VALUE_NOT_A_CREDENTIAL_123";
   const result = await scanner.scan([
     { path: "src/clean.ts", content: "export const ready = true;" },
-    { path: "src/synthetic.ts", content: `export const token = "${syntheticValue}";` },
+    { path: "src/synthetic.ts", content: `export const token = "${syntheticValue}"; // gitleaks:allow` },
   ]);
 
   assert.equal(scanner.version, "gitleaks/8.30.1");

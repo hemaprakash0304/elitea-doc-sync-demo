@@ -3,38 +3,7 @@ import { coordinateRun } from "./coordinator.js";
 import { createRunConfiguration, ConfigurationError } from "./config.js";
 import { GitleaksSecretScanner } from "./gitleaks-scanner.js";
 import { createGitHubProposalWriteClient } from "./github-proposal-client.js";
-import {
-  AUTOMATED_TEST_SUITE_VERSION,
-  REQUIRED_AUTOMATED_TEST_COUNT,
-  type AutomatedTestBinding,
-  type AutomatedTestResult,
-} from "./gate.js";
-
-export function createBoundAutomatedTestAttestation(
-  binding: AutomatedTestBinding,
-  environment: NodeJS.ProcessEnv = process.env,
-): AutomatedTestResult {
-  if (environment.DOCS_SYNC_AUTOMATED_TESTS_PASSED !== "true") {
-    return {
-      status: "UNAVAILABLE",
-      suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-      totalTests: 0,
-      passedTests: 0,
-      failedTests: 0,
-      skippedTests: 0,
-      binding,
-    };
-  }
-  return {
-    status: "PASS",
-    suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: REQUIRED_AUTOMATED_TEST_COUNT,
-    passedTests: REQUIRED_AUTOMATED_TEST_COUNT,
-    failedTests: 0,
-    skippedTests: 0,
-    binding,
-  };
-}
+import { createAutomatedTestRunner } from "./automated-tests.js";
 
 async function main(): Promise<number> {
   try {
@@ -45,7 +14,7 @@ async function main(): Promise<number> {
     const configuration = createRunConfiguration(args.filter((argument) => argument !== "--validate-only"), process.env);
     const result = await coordinateRun(configuration, {
       secretScanner: new GitleaksSecretScanner(),
-      automatedTests: (binding) => createBoundAutomatedTestAttestation(binding, process.env),
+      automatedTests: createAutomatedTestRunner(),
       ...(validateOnly ? {} : {
         createProposalWriteClient: (runConfiguration, repository) =>
           createGitHubProposalWriteClient(runConfiguration, repository),

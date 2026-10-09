@@ -116,6 +116,7 @@ function runGitleaks(
       "dir",
       "--config", configPath,
       "--redact=100",
+      "--ignore-gitleaks-allow",
       "--report-format=json",
       "--report-path", "-",
       "--no-banner",

@@ -188,7 +188,7 @@ test("creates a target-scoped feature branch, one-file commit, and review PR wit
       return response(200, [{
         state: "open",
         title: "docs: update technical profile",
-        body: `- Snapshot: ${SNAPSHOT_SHA.slice(0, 12)}\n- Profile digest: ${CANDIDATE_DIGEST}`,
+        body: `- Snapshot: ${SNAPSHOT_SHA}\n- Profile digest: ${CANDIDATE_DIGEST}`,
         head: { ref: "docs-sync/technical-profile/previous-run-abcdef123456", repo: { full_name: REPOSITORY.fullName } },
         base: { ref: REPOSITORY.defaultBranch },
       }]);
@@ -207,6 +207,36 @@ test("creates a target-scoped feature branch, one-file commit, and review PR wit
   });
   assert.equal(existingProposal.failureCode, "OPEN_PROPOSAL_EXISTS");
   assert.equal(duplicateBranchWrites, 0);
+
+  const differentSnapshotSha = `${SNAPSHOT_SHA.slice(0, 12)}${"b".repeat(28)}`;
+  let samePrefixBranchWrites = 0;
+  const samePrefixProposalClient = proposalClient(async (input, init) => {
+    if (String(input).includes("/app/installations/67890/access_tokens")) return response(201, { token: SYNTHETIC_TOKEN });
+    if (String(input).endsWith("/pulls?state=open&per_page=100")) {
+      return response(200, [{
+        state: "open",
+        title: "docs: update technical profile",
+        body: `- Snapshot: ${SNAPSHOT_SHA}\n- Profile digest: ${CANDIDATE_DIGEST}`,
+        head: { ref: "docs-sync/technical-profile/previous-run-abcdef123456", repo: { full_name: REPOSITORY.fullName } },
+        base: { ref: REPOSITORY.defaultBranch },
+      }]);
+    }
+    if (init?.method === "POST" && String(input).endsWith("/git/refs")) samePrefixBranchWrites += 1;
+    return response(500, {});
+  });
+  const samePrefixProposal = await samePrefixProposalClient.createFeatureBranch({
+    repositoryId: REPOSITORY.repositoryId,
+    repositoryFullName: REPOSITORY.fullName,
+    branchName: BRANCH_NAME,
+    baseBranch: REPOSITORY.defaultBranch,
+    baseCommitSha: differentSnapshotSha,
+    candidateSha256: CANDIDATE_DIGEST,
+    signal: new AbortController().signal,
+  });
+  assert.equal(SNAPSHOT_SHA.slice(0, 12), differentSnapshotSha.slice(0, 12));
+  assert.notEqual(SNAPSHOT_SHA, differentSnapshotSha);
+  assert.equal(samePrefixProposal.failureCode, "OPEN_PROPOSAL_CONFLICT");
+  assert.equal(samePrefixBranchWrites, 0);
 });
 
 test("requires Actions context, exact target, and explicit branch-protection confirmation", () => {

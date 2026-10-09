@@ -11,6 +11,7 @@ import {
   type ProposalAuthorization,
 } from "../src/gate.js";
 import type { GitHubCommitSnapshot, GitHubReadClient, GitHubRepositoryMetadata } from "../src/github-client.js";
+import { GitHubReadError } from "../src/github-errors.js";
 import { buildEvidenceCatalog } from "../src/evidence/catalog.js";
 import type { RepositoryFilterResult, SecretScanInputFile, SecretScanOutcome, SecretScanner } from "../src/filter.js";
 import {
@@ -19,6 +20,7 @@ import {
   type ProposalCommitResult,
   type ProposalInput,
   type ProposalPullRequestResult,
+  type ProposalResult,
   type ProposalWriteCapability,
   type ProposalWriteClient,
 } from "../src/proposal.js";
@@ -49,8 +51,8 @@ const SCANNER_VERSION = "test-double/1";
 const TEST_RESULT_BASE = {
   status: "PASS" as const,
   suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-  totalTests: 209,
-  passedTests: 209,
+  totalTests: 213,
+  passedTests: 213,
   failedTests: 0,
   skippedTests: 0,
 };
@@ -135,6 +137,12 @@ class FakeProposalWriteClient implements ProposalWriteClient {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value.replace(/\r\n/g, "\n"), "utf8").digest("hex");
+}
+
+function assertSingleProposalAttempt(writer: FakeProposalWriteClient): void {
+  for (const method of ["createFeatureBranch", "commitSingleProfileFile", "createPullRequest"]) {
+    assert.equal(writer.calls.filter((call) => call.method === method).length, 1, method);
+  }
 }
 
 function makeReadClient(options: { currentCommitSha?: string; metadata?: GitHubRepositoryMetadata } = {}): GitHubReadClient & { calls: string[] } {
@@ -296,7 +304,7 @@ test("creates a snapshot-based feature branch, single-file commit, and human-rev
   assert.equal(pullRequestRequest.headBranch, result.branchName);
   assert.equal(pullRequestRequest.baseBranch, REPOSITORY.defaultBranch);
   assert.match(pullRequestRequest.body, /Gate: PASS/);
-  assert.match(pullRequestRequest.body, /Snapshot: a{12}/);
+  assert.match(pullRequestRequest.body, /Snapshot: a{40}/);
   assert.match(pullRequestRequest.body, new RegExp(`Profile digest: ${result.candidateSha256}`));
   assert.doesNotMatch(pullRequestRequest.body, /password|token|private key/i);
   assert.equal("credential" in input.writeClient, false);
@@ -497,6 +505,62 @@ test("closes a PR if the default branch becomes stale during handoff", async () 
   assert.equal(result.failureCode, "STALE_PULL_REQUEST_CLOSED");
   assert.equal(input.writeClient.calls.at(-1)?.method, "closePullRequest");
   assert.equal(input.writeClient.calls.some((call) => call.method === "createPullRequest"), true);
+});
+
+async function submitWithPostPullRequestReadFailure(
+  input: Awaited<ReturnType<typeof makeProposalInput>>,
+): Promise<ProposalResult> {
+  let branchReads = 0;
+  const readClient: GitHubReadClient = {
+    ...input.readClient,
+    getDefaultBranchCommit: async (_configuration, branch) => {
+      branchReads += 1;
+      if (branchReads > 2) throw new GitHubReadError("NETWORK_FAILURE");
+      return { ...SNAPSHOT, branch };
+    },
+  };
+  return submitTechnicalProfileProposal({ ...input, readClient });
+}
+
+test("closes the new PR once when post-creation freshness cannot be verified", async () => {
+  const input = await makeProposalInput();
+  const result = await submitWithPostPullRequestReadFailure(input);
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.failureCode, "POST_PULL_REQUEST_STATE_UNVERIFIED_CLOSED");
+  assert.equal(result.pullRequest?.number, 7);
+  assertSingleProposalAttempt(input.writeClient);
+  assert.equal(input.writeClient.calls.filter((call) => call.method === "closePullRequest").length, 1);
+  assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC|NETWORK_FAILURE/);
+});
+
+test("reports an unverified PR as open when safe closure fails", async () => {
+  const input = await makeProposalInput();
+  input.writeClient.closePullRequest = async (request) => {
+    input.writeClient.calls.push({ method: "closePullRequest", input: request });
+    throw new Error("SYNTHETIC_ONLY_CLOSE_RESPONSE_VALUE");
+  };
+  const result = await submitWithPostPullRequestReadFailure(input);
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.failureCode, "POST_PULL_REQUEST_STATE_UNVERIFIED_OPEN");
+  assert.equal(result.pullRequest?.number, 7);
+  assertSingleProposalAttempt(input.writeClient);
+  assert.equal(input.writeClient.calls.filter((call) => call.method === "closePullRequest").length, 1);
+  assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC_ONLY_CLOSE_RESPONSE_VALUE/);
+});
+
+test("reports an unverified PR as open when safe closure is unavailable", async () => {
+  const input = await makeProposalInput();
+  Object.assign(input.writeClient, { closePullRequest: undefined });
+  const result = await submitWithPostPullRequestReadFailure(input);
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.failureCode, "POST_PULL_REQUEST_STATE_UNVERIFIED_OPEN");
+  assert.equal(result.pullRequest?.number, 7);
+  assertSingleProposalAttempt(input.writeClient);
+  assert.equal(input.writeClient.calls.some((call) => call.method === "closePullRequest"), false);
+  assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC/);
 });
 
 test("closes an attributable PR response that targets the wrong base branch", async () => {

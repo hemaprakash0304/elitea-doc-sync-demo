@@ -42,10 +42,12 @@ test("keeps proposal credentials behind a successful read-only validation job", 
 
   const validationStep = validation.steps?.find((step) => step.name === "Validate target configuration");
   const proposalStep = proposal.steps?.find((step) => step.name === "Revalidate and create review proposal");
+  assert.equal(validation.steps?.find((step) => step.name === "Build CLI and test suite")?.run, "npm run build");
+  assert.equal(proposal.steps?.find((step) => step.name === "Build CLI and test suite")?.run, "npm run build");
   assert.match(validationStep?.run ?? "", /--validate-only/);
-  assert.equal(validationStep?.env?.DOCS_SYNC_AUTOMATED_TESTS_PASSED, "true");
+  assert.equal(validationStep?.env?.DOCS_SYNC_AUTOMATED_TESTS_PASSED, undefined);
   assert.equal(validationStep?.env?.DOCS_SYNC_PROPOSAL_APP_PRIVATE_KEY, undefined);
-  assert.equal(proposalStep?.env?.DOCS_SYNC_AUTOMATED_TESTS_PASSED, "true");
+  assert.equal(proposalStep?.env?.DOCS_SYNC_AUTOMATED_TESTS_PASSED, undefined);
   assert.equal(proposalStep?.env?.DOCS_SYNC_PROPOSAL_BRANCH_PROTECTION_CONFIRMED, "\${{ vars.DOCS_SYNC_PROPOSAL_BRANCH_PROTECTION_CONFIRMED }}");
   assert.equal(proposalStep?.env?.DOCS_SYNC_PROPOSAL_APP_PRIVATE_KEY, "\${{ secrets.DOCS_SYNC_PROPOSAL_APP_PRIVATE_KEY }}");
 });

@@ -119,8 +119,8 @@ function successfulSource(): RunReportSource {
       automatedTestResult: {
         status: "PASS",
         suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-        totalTests: 209,
-        passedTests: 209,
+        totalTests: 213,
+        passedTests: 213,
         failedTests: 0,
         skippedTests: 0,
         binding: {

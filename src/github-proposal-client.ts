@@ -173,11 +173,11 @@ class GitHubAppProposalWriteClient implements ProposalWriteClient {
       }
 
       const body = typeof proposal.body === "string" ? proposal.body : "";
-      const snapshot = /^- Snapshot: ([a-f0-9]{12})$/m.exec(body)?.[1];
+      const snapshot = /^- Snapshot: ([a-f0-9]{40})$/m.exec(body)?.[1];
       const digest = /^- Profile digest: ([a-f0-9]{64})$/m.exec(body)?.[1];
       if (
         proposal.title === "docs: update technical profile" &&
-        snapshot === input.baseCommitSha.slice(0, 12).toLowerCase() &&
+        snapshot === input.baseCommitSha.toLowerCase() &&
         digest === input.candidateSha256.toLowerCase()
       ) {
         return {

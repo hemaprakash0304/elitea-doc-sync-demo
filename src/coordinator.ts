@@ -389,7 +389,11 @@ async function executeCoordinatorRun(
       const stale = proposal.status === "STALE";
       const code = stale ? "PROPOSAL_STALE" : proposal.status === "BLOCKED" ? "PROPOSAL_BLOCKED" : "PROPOSAL_FAILED";
       const message = stale
-        ? "The default branch changed after validation; no proposal was made. Rerun the complete pipeline on the latest snapshot."
+        ? proposal.pullRequest === undefined
+          ? "The default branch changed after validation; no proposal was made. Rerun the complete pipeline on the latest snapshot."
+          : proposal.failureCode === "STALE_PULL_REQUEST_CLOSED"
+            ? "The default branch changed after PR creation; the stale PR was closed. Rerun the complete pipeline on the latest snapshot."
+            : "The default branch changed after PR creation and the PR may remain open; human intervention is required."
         : proposal.status === "BLOCKED"
           ? proposal.failureCode === "OPEN_PROPOSAL_EXISTS"
             ? "An exact matching open proposal already exists; no duplicate branch or pull request was created."
@@ -398,7 +402,11 @@ async function executeCoordinatorRun(
               : proposal.failureCode === "OPEN_PROPOSAL_STATE_UNVERIFIED"
                 ? "Open proposal state could not be verified; no new branch or pull request was created."
                 : "Proposal capability or authorization was unavailable or invalid; no branch or pull request was created."
-          : "Proposal creation failed safely; the approved default branch was not changed.";
+            : proposal.failureCode === "POST_PULL_REQUEST_STATE_UNVERIFIED_CLOSED"
+              ? "Post-proposal snapshot freshness could not be verified; the new pull request was closed. Rerun the full pipeline."
+              : proposal.failureCode === "POST_PULL_REQUEST_STATE_UNVERIFIED_OPEN"
+                ? "Post-proposal snapshot freshness could not be verified and the pull request may remain open; human intervention is required."
+                : "Proposal creation failed safely; the approved default branch was not changed.";
       return {
         ok: false,
         error: { code, message, retryCount: 0 },

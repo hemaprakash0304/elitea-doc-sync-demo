@@ -38,6 +38,8 @@ export type ProposalFailureCode =
   | "PULL_REQUEST_FAILED"
   | "PULL_REQUEST_RESPONSE_INVALID"
   | "PROPOSAL_TIMED_OUT"
+  | "POST_PULL_REQUEST_STATE_UNVERIFIED_CLOSED"
+  | "POST_PULL_REQUEST_STATE_UNVERIFIED_OPEN"
   | "OPEN_PROPOSAL_EXISTS"
   | "OPEN_PROPOSAL_CONFLICT"
   | "OPEN_PROPOSAL_STATE_UNVERIFIED"
@@ -335,37 +337,31 @@ export async function submitTechnicalProfileProposal(input: ProposalInput): Prom
   }
 
   const afterPullRequest = await readCurrentDefaultBranch(input);
-  if (afterPullRequest.status === "STALE") {
-    let closed = false;
-    try {
-      closed = await withProposalTimeout(input, "PROPOSAL_CLOSE", (signal) => writer.closePullRequest({
-        repositoryId: input.repository.repositoryId,
-        repositoryFullName: input.repository.fullName,
-        pullRequestNumber: pullRequest.number,
-        signal,
-      }));
-    } catch {
-      closed = false;
-    }
-    return {
-      ...base,
-      status: "STALE",
-      changedFiles: [TECHNICAL_PROFILE_PATH],
-      branchName,
-      commitSha: commit.commitSha,
-      pullRequest: { number: pullRequest.number, url: pullRequest.url },
-      failureCode: closed ? "STALE_PULL_REQUEST_CLOSED" : "STALE_PULL_REQUEST_CLOSE_FAILED",
-    };
-  }
   if (afterPullRequest.status !== "CURRENT") {
+    let closed = false;
+    if (typeof writer.closePullRequest === "function") {
+      try {
+        closed = await withProposalTimeout(input, "PROPOSAL_CLOSE", (signal) => writer.closePullRequest({
+          repositoryId: input.repository.repositoryId,
+          repositoryFullName: input.repository.fullName,
+          pullRequestNumber: pullRequest.number,
+          signal,
+        }));
+      } catch {
+        closed = false;
+      }
+    }
+    const stale = afterPullRequest.status === "STALE";
     return {
       ...base,
-      status: "FAILED",
+      status: stale ? "STALE" : "FAILED",
       changedFiles: [TECHNICAL_PROFILE_PATH],
       branchName,
       commitSha: commit.commitSha,
       pullRequest: { number: pullRequest.number, url: pullRequest.url },
-      failureCode: afterPullRequest.code,
+      failureCode: stale
+        ? closed ? "STALE_PULL_REQUEST_CLOSED" : "STALE_PULL_REQUEST_CLOSE_FAILED"
+        : closed ? "POST_PULL_REQUEST_STATE_UNVERIFIED_CLOSED" : "POST_PULL_REQUEST_STATE_UNVERIFIED_OPEN",
     };
   }
 
@@ -602,14 +598,14 @@ function validPullRequest(
 }
 
 function pullRequestBody(input: ProposalInput, candidateSha256: string): string {
-  const shortSnapshot = input.snapshot.commitSha.slice(0, 12);
+  const snapshotSha = input.snapshot.commitSha.toLowerCase();
   return [
     "### Summary",
     "Automated technical profile synchronization.",
     "",
     "### Validation",
     "- Gate: PASS",
-    `- Snapshot: ${shortSnapshot}`,
+    `- Snapshot: ${snapshotSha}`,
     `- Profile digest: ${candidateSha256}`,
   ].join("\n");
 }

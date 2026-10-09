@@ -6,7 +6,7 @@ import test from "node:test";
 import type { RunConfiguration } from "../src/config.js";
 import { coordinateRun } from "../src/coordinator.js";
 import { GitHubReadError } from "../src/github-errors.js";
-import { createBoundAutomatedTestAttestation } from "../src/index.js";
+import { createAutomatedTestRunner } from "../src/automated-tests.js";
 import { AUTOMATED_TEST_SUITE_VERSION, type AutomatedTestBinding, type AutomatedTestResult } from "../src/gate.js";
 import type { SecretScanner } from "../src/filter.js";
 import type { ProposalWriteCapability, ProposalWriteClient } from "../src/proposal.js";
@@ -36,8 +36,8 @@ function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
   return {
     status: "PASS",
     suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: 209,
-    passedTests: 209,
+    totalTests: 213,
+    passedTests: 213,
     failedTests: 0,
     skippedTests: 0,
     binding,
@@ -392,7 +392,7 @@ test("diagnostics omit injected sensitive values and configuration fields", asyn
   assert.doesNotMatch(serializedResult, /targetRepository/);
 });
 
-test("CLI rejects branch overrides before contacting GitHub", () => {
+test("CLI rejects branch overrides and test attestations require executed suite evidence", async () => {
   const cliPath = fileURLToPath(new URL("../src/index.js", import.meta.url));
   const result = spawnSync(
     process.execPath,
@@ -410,11 +410,64 @@ test("CLI rejects branch overrides before contacting GitHub", () => {
     candidateSha256: "c".repeat(64),
     schemaVersion: 1,
   };
-  const attestation = createBoundAutomatedTestAttestation(binding, { DOCS_SYNC_AUTOMATED_TESTS_PASSED: "true" });
+  const passOutput = [
+    "TAP version 13",
+    "1..213",
+    "# tests 213",
+    "# suites 0",
+    "# pass 213",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+  ].join("\n");
+  const attestation = await createAutomatedTestRunner(async () => ({ exitCode: 0, output: passOutput }))(
+    binding,
+    new AbortController().signal,
+  );
   assert.equal(attestation.status, "PASS");
-  assert.equal(attestation.totalTests, 209);
+  assert.equal(attestation.totalTests, 213);
   assert.deepEqual(attestation.binding, binding);
-  assert.equal(createBoundAutomatedTestAttestation(binding, {}).status, "UNAVAILABLE");
+
+  const skippedEvidence = await createAutomatedTestRunner(async () => ({
+    exitCode: 0,
+    output: passOutput.replace("# skipped 0", "# skipped 1"),
+  }))(binding, new AbortController().signal);
+  assert.equal(skippedEvidence.status, "SKIPPED");
+  const cancelledEvidence = await createAutomatedTestRunner(async () => ({
+    exitCode: 0,
+    output: passOutput.replace("# cancelled 0", "# cancelled 1"),
+  }))(binding, new AbortController().signal);
+  assert.equal(cancelledEvidence.status, "CANCELLED");
+  const mismatchedEvidence = await createAutomatedTestRunner(async () => ({
+    exitCode: 0,
+    output: passOutput.replace("# tests 213", "# tests 214"),
+  }))(binding, new AbortController().signal);
+  assert.equal(mismatchedEvidence.status, "INDETERMINATE");
+
+  const originalPassFlag = process.env.DOCS_SYNC_AUTOMATED_TESTS_PASSED;
+  process.env.DOCS_SYNC_AUTOMATED_TESTS_PASSED = "true";
+  try {
+    const failedEvidence = await createAutomatedTestRunner(async () => ({
+      exitCode: 1,
+      output: passOutput.replace("# pass 213", "# pass 212").replace("# fail 0", "# fail 1"),
+    }))(binding, new AbortController().signal);
+    assert.equal(failedEvidence.status, "FAIL");
+    assert.notEqual(failedEvidence.status, "PASS");
+  } finally {
+    if (originalPassFlag === undefined) delete process.env.DOCS_SYNC_AUTOMATED_TESTS_PASSED;
+    else process.env.DOCS_SYNC_AUTOMATED_TESTS_PASSED = originalPassFlag;
+  }
+
+  const missingEvidence = await createAutomatedTestRunner(async () => {
+    throw new Error("synthetic test runner unavailable");
+  })(binding, new AbortController().signal);
+  assert.equal(missingEvidence.status, "UNAVAILABLE");
+  const invalidEvidence = await createAutomatedTestRunner(async () => ({ exitCode: 0, output: "not a TAP report" }))(
+    binding,
+    new AbortController().signal,
+  );
+  assert.equal(invalidEvidence.status, "INDETERMINATE");
 });
 
 test("blocks gate progression when the automated test result is missing or failed", async (t) => {

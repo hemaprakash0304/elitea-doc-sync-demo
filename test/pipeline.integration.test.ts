@@ -24,8 +24,8 @@ function passingTestResult(binding: AutomatedTestBinding): AutomatedTestResult {
   return {
     status: "PASS",
     suiteVersion: AUTOMATED_TEST_SUITE_VERSION,
-    totalTests: 209,
-    passedTests: 209,
+    totalTests: 213,
+    passedTests: 213,
     failedTests: 0,
     skippedTests: 0,
     binding,
@@ -298,6 +298,28 @@ test("runs first generation through the fake proposal boundary and repeats deter
   assert.equal(second.composition.candidateSha256, result.composition.candidateSha256);
   assert.deepEqual(second.validation, result.validation);
   assert.deepEqual(second.report, result.report);
+});
+
+test("generates a complete bounded profile for an empty repository", async () => {
+  const run = await runSnapshot({});
+  const result = requireSuccess(run.result);
+  const headings = [...result.composition.candidate.matchAll(/^## \d+\. .+$/gm)].map((match) => match[0]);
+
+  assert.deepEqual(headings, PROFILE_SECTIONS.map((section, index) => `## ${index + 1}. ${section.field}`));
+  assert.match(result.composition.candidate, /\| Description \| Not Specified \| Not Specified \|/);
+  assert.match(result.composition.candidate, /\| Primary language \| Not Specified \| Not Specified \|/);
+  assert.match(result.composition.candidate, /\| Runtime\(s\) \| Not Specified \| Not Specified \|/);
+  assert.match(result.composition.candidate, /\| Repository \| Sample\/EliteA-Pipeline-Fixture \| Verified \|/);
+  assert.equal(result.validation.status, "PASS");
+  assert.equal(result.gate.status, "PASS");
+  assert.equal(result.proposal.status, "CREATED");
+  assert.deepEqual(run.fixture.calls.blobs, []);
+  assert.deepEqual(run.fixture.proposalCalls.map((call) => call.method), [
+    "createFeatureBranch", "commitSingleProfileFile", "getBranchHead", "createPullRequest",
+  ]);
+  const commit = run.fixture.proposalCalls[1]?.input as { path: string; content: string };
+  assert.equal(commit.path, TECHNICAL_PROFILE_PATH);
+  assert.equal(commit.content, result.reconciliation.candidate);
 });
 
 test("returns NO_CHANGES for an identical generated profile and preserves manual notes", async () => {

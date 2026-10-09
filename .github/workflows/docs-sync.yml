@@ -34,8 +34,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build and test foundation
-        run: npm test
+      - name: Build CLI and test suite
+        run: npm run build
 
       - name: Validate target configuration
         env:
@@ -43,7 +43,6 @@ jobs:
           DOCS_SYNC_READ_APP_ID: ${{ vars.DOCS_SYNC_READ_APP_ID }}
           DOCS_SYNC_READ_APP_INSTALLATION_ID: ${{ vars.DOCS_SYNC_READ_APP_INSTALLATION_ID }}
           DOCS_SYNC_READ_APP_PRIVATE_KEY: ${{ secrets.DOCS_SYNC_READ_APP_PRIVATE_KEY }}
-          DOCS_SYNC_AUTOMATED_TESTS_PASSED: "true"
         run: npm run docs:sync -- --repository "$TARGET_REPOSITORY" --validate-only
 
   propose-change:
@@ -68,10 +67,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build CLI and test suite
+        run: npm run build
+
       - name: Revalidate and create review proposal
         env:
           TARGET_REPOSITORY: ${{ inputs.target_repository }}
-          DOCS_SYNC_AUTOMATED_TESTS_PASSED: "true"
           DOCS_SYNC_READ_APP_ID: ${{ vars.DOCS_SYNC_READ_APP_ID }}
           DOCS_SYNC_READ_APP_INSTALLATION_ID: ${{ vars.DOCS_SYNC_READ_APP_INSTALLATION_ID }}
           DOCS_SYNC_READ_APP_PRIVATE_KEY: ${{ secrets.DOCS_SYNC_READ_APP_PRIVATE_KEY }}
